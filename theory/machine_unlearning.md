@@ -52,17 +52,3 @@ faisable de générer massivement des données d'entraînement représentatives 
 - L'attaquant n'a pas nécessairement des ressources suffisantes afin d'entraîner un grand modèle à partir de zéro.
 
 En comparaison, l'estimation des paramètres $\bold{\theta}^\star$ du modèle consiste principalement en une étape d'inférence sur un sous-ensemble réduit $S_{\mathrm{poison}}$ des données d'entraînement. Aucune étape d'entraînement n'est nécessaire.
-
-#### Régression logistique
-
-Considérons le modèle du réseau de neurones à une couche dense :
-$$z = \theta(x) = \sigma(W x + b)$$
-où $\displaystyle \sigma: x \mapsto \frac{1}{1 + e^{-x}}$ est la fonction sigmoïde, prise pour chaque élément du vecteur $y = W x + b$.
-
-$$
-\begin{align*}
-\mathrm{\widehat{Cov}}(z^\star, \xi) &= \mathrm{\widehat{Cov}}(\sigma(W (x + \xi) + b), \xi) \\
-    &= \mathrm{\widehat{Cov}}(\sigma(y + W \xi), \xi) \\
-    
-\end{align*}
-$$
