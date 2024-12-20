@@ -1,6 +1,15 @@
 
 # Actualités sur la sûreté de l'IA
 
+## 2024-12
+
+- [https://arcprize.org/blog/oai-o3-pub-breakthrough](OpenAI o3 Breakthrough High Score on ARC-AGI-Pub)
+Le modèle o3 effectue une recherche arborescente sur l'espace des _Chain-of-Thoughts_. [Commentaire de Simon Willinson](https://simonwillison.net/2024/Dec/20/openai-o3-breakthrough/) :
+> I'm not sure if o3 (and o1 and similar models) even qualifies as an LLM any more - there's clearly a whole lot more going on here than just next-token prediction.
+
+- [Decembers in LLMs has been a lot](https://simonwillison.net/2024/Dec/20/december-in-llms-has-been-a-lot/)
+
+
 ## 2024-10
 
 
