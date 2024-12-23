@@ -86,8 +86,30 @@ La régression logistique fonctionne un peu comme la régression linéaire, cepe
 
 ## Classification d'images
 
-_Fichier à modifier_ : [`image_classification.ipynb`](./image_classification.ipynb)
+_Fichier à modifier_ : [`label_flipping.ipynb`](./label_flipping.ipynb)
 
 Comme pour la régression logistique, on appliquera du label flipping, mais sur un jeu de données avec plusieurs classes (labels). On peut le générer ou utiliser des données réelles comme celles du [MNIST digits](https://pytorch.org/vision/stable/generated/torchvision.datasets.MNIST.html#torchvision.datasets.MNIST), [Fashion MNIST](https://pytorch.org/tutorials//beginner/basics/data_tutorial.html) ou encore [CIFAR10](https://pytorch.org/vision/stable/generated/torchvision.datasets.CIFAR10.html#torchvision.datasets.CIFAR10). Il faut cette fois enlever la fonction d'activation et utiliser `torch.nn.CrossEntropyLoss` par exemple.
 
 Cette fois, il est plus difficile de visualiser les données et de déterminer les frontières de classification. On pourra essayer d'effectuer un _label flipping_ ciblé sur les données où la fonction de perte est maximale (ou la probabilité de prédiction est minimale).
+
+
+
+## Et après...
+
+### Montée de gradient sur un modèle de classification basé sur du MLP
+
+### Empoisonner un ResNet entraîné sur CIFAR100
+
+### Fuite de données / propagation de virus sur modèle basé sur du RAG
+
+### Revue des méthodes de gradient et de régularisation
+
+- Empoisonnement SVC sur Iris
+- Empoisonnement des données par montée de gradient
+- Machine unlearning par montée de gradient
+- Fuite de données par reconstruction de gradient
+- Reconstruction et ré-entraînement
+- Overfitting et empoisonnement
+- Unlearning sur une donnée temporelle (sinus)
+- L'empoisonnement modifie largement les poids (après descente de gradient : non lipschitzien)
+  - Amplitude de la perturbation sur les poids en fonction de l'amplitude de l'empoisonnement et de la dimension du modèle
