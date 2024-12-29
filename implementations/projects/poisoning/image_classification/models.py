@@ -75,12 +75,12 @@ class BigCNN(ConvNet):
     """
     A CNN with two convolution layers.
     """
-    def __init__(self, regularized=False, hidden_layer_dim=256, **kwargs):
+    def __init__(self, hidden_layer_dim=256, batchnorm=False, dropout_rate=None, **kwargs):
         super().__init__(
-            num_conv_layers = 2,
-            hidden_layer_dim = hidden_layer_dim,
-            batchnorm = regularized,
-            dropout_rate = 0.5 if regularized else None,
+            num_conv_layers=2,
+            hidden_layer_dim=hidden_layer_dim,
+            batchnorm=batchnorm,
+            dropout_rate=dropout_rate,
             **kwargs
         )
 
@@ -88,11 +88,11 @@ class SmallCNN(ConvNet):
     """
     A CNN with a single convolution layer.
     """
-    def __init__(self, regularized=True, hidden_layer_dim=64, **kwargs):
+    def __init__(self, hidden_layer_dim=64, batchnorm=True, dropout_rate=0.1, **kwargs):
         super().__init__(
             num_conv_layers = 1,
-            hidden_layer_dim = hidden_layer_dim,
-            batchnorm = regularized,
-            dropout_rate = 0.1 if regularized else None,
+            hidden_layer_dim=hidden_layer_dim,
+            batchnorm=batchnorm,
+            dropout_rate=dropout_rate,
             **kwargs
         )

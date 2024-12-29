@@ -12,7 +12,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from .utils import tqdm, trange
 from .datasets import class_weights
-from .nn import Hyperparameters, train_loop, train_test_loop
+from .nn import Hyperparameters, train_loop
 from .accel import optimize_model
 from .evaluate import labels_and_predictions, most_frequent_confusions
 
