@@ -9,17 +9,19 @@ from torch.nn import CrossEntropyLoss
 from torch.nn.modules.loss import _Loss, _WeightedLoss
 from torch.optim import Optimizer, AdamW
 from torch.utils.data import Dataset, DataLoader
+from torchmetrics import Metric, Accuracy
 
 from .datasets import class_weights
 from .utils import tqdm, trange
 
 
-def _train_loop(
+def train_epoch(
         model: nn.Module,
         dataloader: DataLoader,
         loss_fn: _Loss,
         optimizer: Optimizer,
         keep_pbars=True,
+        metric: Metric = None,
     ):
     #optimizer.zero_grad()
     # Set the model to training mode - important for batch normalization and dropout layers
@@ -44,15 +46,16 @@ def _train_loop(
         print(pbar)
     pbar.close()
 
-def _test_loop(
+def test_epoch(
         model: nn.Module,
         dataloader: DataLoader,
         loss_fn: _Loss,
         keep_pbars=False,
+        metric: Metric = None,
     ):
     # Set the model to evaluation mode - important for batch normalization and dropout layers
     model.eval()
-    test_loss, correct = 0, 0
+    test_loss = 0.0
     # Make a nice progress bar
     pbar = tqdm(desc='Test loop', total=len(dataloader.dataset), leave=keep_pbars)
 
@@ -61,12 +64,18 @@ def _test_loop(
     with torch.no_grad():
         for i, (X, y) in enumerate(dataloader):
             logits = model(X)
-            test_loss += loss_fn(logits, y).item()
-            correct += (logits.argmax(1) == y).type(torch.float).sum().item()
+            loss = loss_fn(logits, y).item()
+            test_loss += loss
+
+            metrics = {}
+            if metric is not None:
+                metric_name = metric._get_name()
+                metric_on_batch = metric(logits, y).item()
+                metrics[metric_name] = metric_on_batch
 
             pbar.n += len(X)
             pbar.set_postfix(
-                accuracy=(correct / pbar.n),
+                **metrics,
                 avg_loss=(test_loss / (i + 1)),
             )
 
@@ -82,12 +91,19 @@ def train_loop(
         optimizer: Optimizer,
         epochs: int,
         keep_pbars=True,
+        metric: Metric = None,
     ):
     """
     Run the training loop on the model without testing.
     """
     for _ in trange(epochs, desc='Train epochs', unit='epoch', leave=keep_pbars):
-        _train_loop(model, train_dataloader, loss_fn, optimizer, keep_pbars=keep_pbars)
+        train_epoch(
+            model,
+            train_dataloader,
+            loss_fn, optimizer,
+            keep_pbars=keep_pbars,
+            metric=metric,
+        )
 
 def train_test_loop(
         model: nn.Module,
@@ -97,6 +113,7 @@ def train_test_loop(
         optimizer: Optimizer,
         epochs: int,
         keep_pbars=True,
+        metric: Metric = None,
     ):
     """
     Run the training and testing loop on the model.
@@ -104,8 +121,59 @@ def train_test_loop(
     If `test_dataloader` is `None`, no testing is performed after training.
     """
     for _ in trange(epochs, desc='Train epochs', unit='epoch', leave=keep_pbars):
-        _train_loop(model, train_dataloader, loss_fn, optimizer, keep_pbars=keep_pbars)
-        _test_loop(model, test_dataloader, loss_fn, keep_pbars=keep_pbars)
+        train_epoch(model, train_dataloader, loss_fn, optimizer, keep_pbars=keep_pbars)
+        test_epoch(model, test_dataloader, loss_fn, keep_pbars=keep_pbars, metric=metric)
+
+
+def distillation_epoch(
+        teacher: nn.Module,
+        student: nn.Module,
+        dataloader: DataLoader,
+        optimizer: Optimizer,
+        criterion,
+        keep_pbars=True,
+    ):
+    """
+    Perform a single epoch of knowledge distillation in a student-teacher method.
+
+    # Arguments
+    - `teacher` : a pretrained, reference model, usually the larger model.
+    - `student` : a possibly untrained model, usually the smaller one.
+    - `dataloader` : the data to compare the models on
+    - `criterion` : a minimizer that takes three arguments:
+        - `logits_student` : the student model predictions
+        - `logits_teacher` : the teacher model predictions
+        - `target` : the target in the dataset
+    """
+    student.train()
+    teacher.eval()
+
+    pbar = tqdm(
+        desc='Transfer learning epoch',
+        total=len(dataloader.dataset),
+        leave=keep_pbars,
+    )
+
+    for X, target in dataloader:
+        # Compute teacher and student predictions
+        logits_teacher = teacher(X)
+        logits_student = student(X)
+
+        loss = criterion(logits_student, logits_teacher, target)
+
+        # Backpropagation
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        pbar.n += len(X)
+        pbar.set_postfix(loss=loss.item())
+
+    if keep_pbars:
+        # Fixes a bug where the HTML output does not survive after closing notebook
+        print(pbar)
+    pbar.close()
+
 
 
 @dataclass(frozen=True)
@@ -153,6 +221,8 @@ class Hyperparameters:
 
     optimizer_params: OptimizerParams = OptimizerParams()
 
+    metric: Metric = Accuracy(task='multiclass', num_classes=10)
+
     def make_optimizer(self, model: nn.Module) -> Optimizer:
         return self.optimizer(
             model.parameters(),
@@ -166,7 +236,7 @@ class Hyperparameters:
         )
     
     def test_loop_params(self) -> dict:
-        return dict(loss_fn=self.loss_fn)
+        return dict(loss_fn=self.loss_fn, metric=self.metric)
     
     def train_test_params(
             self,
@@ -193,8 +263,12 @@ class Hyperparameters:
         if tune_loss_fn and isinstance(loss_fn, _WeightedLoss):
             set_loss_weights(loss_fn, dataset)
         
-        hp = dataclasses.replace(self, loss_fn=loss_fn)
-        return dict(epochs=self.epochs, **self.train_loop_params(model))
+        return dict(
+            epochs=self.epochs,
+            loss_fn=loss_fn,
+            optimizer=self.make_optimizer(model),
+            metric=self.metric,
+        )
 
 
 def set_loss_weights(loss: _WeightedLoss, dataset: Dataset):

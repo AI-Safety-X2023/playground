@@ -12,7 +12,7 @@ from .accel import BEST_DEVICE
 
 class EagerDataset(TensorDataset):
     """
-    A dataset that eagerly perform image preprocessing on a dataset.
+    A dataset that eagerly performs preprocessing on a dataset.
 
     By default, this dataset sends all the features to the GPU if available.
     This eliminates any performance benefit of writing
@@ -26,15 +26,25 @@ class EagerDataset(TensorDataset):
             self,
             data: Tensor,
             targets: Tensor,
-            classes: list = None,
+            classes: list[str] = None,
             device=BEST_DEVICE,
         ):
+        """
+        Create a new dataset.
+        
+        If `classes` is a list of class names, which is relevant
+        if you want to make classification data.
+        """
         self.classes = classes
         if classes is None:
             self.classes = targets.unique()
 
         self.data = data.to(device)
-        self.targets = targets.to('cpu', copy=True)
+        if len(targets.shape) == 1:
+            # This makes it easier to when dealing with classifiers
+            targets = targets.to('cpu', copy=True)
+        self.targets = targets
+
         super().__init__(self.data, self.targets)
     
     @classmethod
