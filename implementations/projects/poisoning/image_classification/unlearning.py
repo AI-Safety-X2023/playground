@@ -218,6 +218,53 @@ def neg_grad_plus(
     pbar.close()
 
 
+def oracle_unlearning(
+        model: nn.Module,
+        forget_uncorrupted: DataLoader,
+        forget: DataLoader,
+        loss_fn: _Loss,
+        optimizer: Optimizer,
+        beta=0.9,
+        keep_pbars=True,
+    ):
+    """
+    A variation of NegGrad+ where the retain set is replaced by the forget set
+    before poisoning.
+
+    This unlearning method requires the defender has access to the original, clean data.
+    However, it is still computationally worthwhile compared to exact unlearning.
+    """
+    model.train()
+
+    pbar = tqdm(desc='Oracle unlearning', total=len(forget.dataset), leave=keep_pbars)
+
+
+    # We perform the unlearning loop on all of the forget set.
+    for (X_r, y_r), (X_f, y_f) in zip(forget_uncorrupted, forget):
+
+        # Compute prediction and loss
+        loss_f = loss_fn(model(X_f), y_f)
+        loss_r = loss_fn(model(X_r), y_r)
+
+        loss = beta * loss_r - (1. - beta) * loss_f
+
+        # Backpropagation
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        pbar.n += len(X_f)
+        pbar.set_postfix(
+            loss=loss.item(),
+            loss_retain=loss_r.item(),
+            loss_forget=loss_f.item(),
+        )
+    
+    if keep_pbars:
+        # Fixes a bug where the HTML output does not survive after closing notebook
+        print(pbar)
+    pbar.close()
+
 
 def scrub_unlearning_epoch(
         teacher: nn.Module,
