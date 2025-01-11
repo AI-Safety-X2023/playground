@@ -71,21 +71,25 @@ class EagerDataset(TensorDataset):
         ]
 
 
-mnist_training_data = EagerDataset.from_torchvision(
-    MNIST(
-        root='data',
-        train=True,
-        download=True,
-    ),
-)
-
-mnist_test_data = EagerDataset.from_torchvision(
-    MNIST(
-        root='data',
-        train=False,
-        download=True,
-    ),
-)
+def mnist_train_test(root='data') -> tuple[EagerDataset, EagerDataset]:
+    """
+    Returns the training set and the test set of the MNIST dataset.
+    """
+    training_data = EagerDataset.from_torchvision(
+        MNIST(
+            root=root,
+            train=True,
+            download=True,
+        ),
+    )
+    test_data = EagerDataset.from_torchvision(
+        MNIST(
+            root=root,
+            train=False,
+            download=True,
+        ),
+    )
+    return training_data, test_data
 
 
 def class_weights(data: Dataset):
