@@ -280,7 +280,8 @@ def scrub_unlearning_epoch(
         # Note: `logits_student` is the reference distribution.
         # The output is assumed to be unnormalized (positive or negative).
         # FIXME: this requires some output regularization to avoid overflow.
-        return F.kl_div(logits_student, logits_teacher, log_target=True, reduction='mean')
+        kl = F.kl_div(logits_student, logits_teacher, log_target=True, reduction='mean')
+        return -kl
     
     return distillation_epoch(
         teacher, student,
