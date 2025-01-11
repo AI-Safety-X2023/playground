@@ -138,6 +138,9 @@ def gaussian_unlearning_score(
     We follow the _Algorithm 3_ in the original paper of Pawelczyk et al:
     https://arxiv.org/abs/2406.17216
     """
+    if isinstance(loss_fn, _Loss) and loss_fn.reduction != 'none':
+        raise ValueError(f'Expected no loss reduction, got `{loss_fn.reduction}`')
+
     p = len(base_data)
     assert p == len(noise), f"Dataset lengths don't match: {p}, {len(noise)}"
 
@@ -150,20 +153,27 @@ def gaussian_unlearning_score(
 
     # There is no memory leak since these dataloader have same length
     for (X_b, y_b), noise_b in zip(base_loader, noise_loader):
-        for X_base, y, xi in zip(X_b, y_b, noise_b):
+        X_b.requires_grad_(True)
 
-            # TODO: compute the model predictions in batch for performance
-            # instead of element-by-element computation, and increase batch_size
-            # (this requires to be careful with gradient computation)
+        logits = model(X_b)
+        loss_b = loss_fn(logits, y_b)
 
-            X_base.requires_grad_(True)
-            loss = loss_fn(model(X_base), y)
+        if not hasattr(loss_b, 'shape') or loss_b.shape == ():
+            raise ValueError(f'Expected a loss value per element, got a scalar')
+        if loss_b.shape != (len(X_b),):
+            raise ValueError(f'Expected a loss value per element, got `{loss_fn.reduction}`')
+
+        # Perform backpropagation on each element of the batch
+        for j, (loss, xi) in enumerate(zip(loss_b, noise_b)):
+            # TODO: find a way to perform batched propagation
+            # This is inefficient because only X_b.grad[j] will be nonzero
             loss.backward()
-
-            g = X_base.grad
+            xi = xi.flatten()
+            g = X_b.grad[j].flatten()
             g_n = g.norm()
-
             I_poison[i] = xi.dot(g) / (epsilon + noise_std * g_n)
-            X_base.requires_grad_(False)
             i += 1
+        
+        X_b.requires_grad_(False)
+
     return I_poison
