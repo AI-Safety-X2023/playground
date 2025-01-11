@@ -26,9 +26,9 @@ class GaussianPoisoningDataset(TensorDataset):
 
         # Parameters
 
-        - `dataset` : the original dataset, which is assumed to have a field `targets`
-        - `poison_budget` : the proportion of the data to be poisoned
-        - `noise_std` : the standard deviation of the noise.
+        - dataset: the original dataset, which is assumed to have a field `targets`
+        - poison_budget: the proportion of the data to be poisoned
+        - noise_std: the standard deviation of the noise.
         """
         if device is None:
             device = dataset.data.device
@@ -121,19 +121,20 @@ def gaussian_unlearning_score(
 
     ## Parameters
     
-    - `base_data` : the **clean** data points `(x_base, y)` such that
+    - base_data: the **clean** data points `(x_base, y)` such that
         the model was trained on `(x, y)` where `x = x_base + noise`.
-    - `noise` : the gaussian centered noise values to test on.
+    - noise: the gaussian centered noise values to test on.
         Usually the noise that was used to poison `base_data`.
-    - `noise_std` : the standard deviation of the noise distribution.
-    - `loss_fn` : the loss function used to compute the gradients.
+    - noise_std: the standard deviation of the noise distribution.
+    - loss_fn: the loss function used to compute the gradients.
         This is the criterion used to train the `model`.
-    - `batch_size` : a performance setting, not relevant at the moment.
-    - `epsilon` : a small value to avoid divisions by zero.
+    - batch_size: a performance setting, not relevant at the moment.
+    - epsilon: a small value to avoid divisions by zero.
       
-    ## Notes
+    ## Returns
 
-    The aggregated GUS is the mean of the individual scores.
+    The list of GUS test values for each element of `base_data`.
+    The aggregated GUS is the mean of these individual scores.
 
     We follow the _Algorithm 3_ in the original paper of Pawelczyk et al:
     https://arxiv.org/abs/2406.17216

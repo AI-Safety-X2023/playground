@@ -54,11 +54,10 @@ def most_frequent_confusions(y_true: Tensor, y_pred: Tensor) -> np.ndarray:
     Returns the most frequent confusion for each class.
 
     # Parameters
-    `y_pred` : `torch.Tensor`
-        A batch of predicted labels.
+    - y_pred:  a batch of predicted labels.
+    
     # Returns
-    `confusions` : `numpy.ndarray`
-        An array of same length as the number of classes.
+    confusions: an array of same length as the number of classes.
     
     For each class `c1`, `confusions[c1]` is the most frequent other class
     that is predicted when the true class is `c1`.
@@ -72,10 +71,10 @@ def _most_frequent_second_predictions(y_logits: Tensor) -> np.ndarray:
     Returns the most frequent second prediction after each class.
 
     # Parameters
-    `y_logits` : `torch.Tensor`
-        A batch of class logits
+    - y_logits: a batch of class logits
+
     # Returns
-    `seconds` : an array of same length as the number of classes.
+    - seconds: an array of same length as the number of classes.
     For each class `c1`, `seconds[c1]` is the most frequent class `c2`
     such that the vector of top-2 predictions is `[c1, c2]`.
     """

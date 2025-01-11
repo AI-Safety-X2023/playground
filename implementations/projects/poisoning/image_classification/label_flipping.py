@@ -33,9 +33,9 @@ class LabelFlippingDataset(Dataset):
         Create a new `LabelFlippingDataset`.
 
         # Parameters
-        - `dataset` : the original dataset, which is assumed to have a field `targets`
-        - `flip_on` : an array of booleans that indicate the samples to be flipped
-        - `flip_table` : a dictionary such that the label `l1` is replaced by `flip_table[l1]`.
+        - dataset: the original dataset, which is assumed to have a field `targets`
+        - flip_on: an array of booleans that indicate the samples to be flipped
+        - flip_table: a dictionary such that the label `l1` is replaced by `flip_table[l1]`.
 
         Only the labels that are keys of `flip_table` are altered,
         so `flip_table` does not need to be complete.
@@ -90,13 +90,15 @@ class LabelFlippingDataset(Dataset):
         Make a dataset with labels flipped according to the `base_model` confusions on `dataset`.
 
         # Parameters
-        - `dataset` : the original dataset
-        - `flip_proportion` : the proportion of the labels to be flipped
-        - `targets` : dict or list-like, optional
+        - dataset: the original dataset
+        - flip_proportion: the proportion of the labels to be flipped
+        - targets: dict or list-like, optional
             - If `targets` is a dictionary, then label `l1` is flipped with `flip_table[l1]`.
-            - If `targets` is a list, then label `l1` is flipped with the most frequent other class that is predicted when the true class is `l1`.
+            - If `targets` is a list, then label `l1` is flipped with
+                the most frequent other class that is predicted when the true class is `l1`.
             - If `targets` is `None`, we perform indiscriminate, untargeted label flipping.
-        - `target_low_loss_criterion` : if specified, flip samples with lowest loss according to this criterion.
+        - target_low_loss_criterion: if specified, flip samples with
+            the lowest loss value according to this criterion.
             This loss function must take two arguments: logits, target.
         """
         if isinstance(targets, Mapping):
@@ -159,8 +161,10 @@ class LabelFlippingAttack:
 
         # Parameters
 
-        - `targets` : the labels to target for label flipping.
-          If set to `None`, an untargeted attack will performed.
+        - flip_proportion: the proportion of labels to flip.
+            If `targets` is not `None`, this proportion is sampled among the targets.
+        - targets: the labels to target for label flipping.
+            If set to `None`, an untargeted attack will performed.
         """
         self.flip_proportion = flip_proportion
         self.targets = targets
@@ -174,7 +178,8 @@ class LabelFlippingAttack:
         ):
         """
         Perform label flipping tuned on a base model and store the poisoned data.
-        See `LabelFlippingDataset.tuned_on` for more info.
+
+        See [`LabelFlippingDataset.tuned_on`] for more info.
         """
         llc = deepcopy(low_loss_criterion)
         if llc is not None:
@@ -230,9 +235,9 @@ class LabelFlippingAttack:
 
         The attack is performed in two steps:
         1. Perform label-flipping on the training data, along a base model.
-           See `self.make_poisoned_data_on()`.
+           See [`self.make_poisoned_data_on`].
         2. The victim is trained on the poisoned dataset.
-           See `self.train()`.
+           See [`self.train`].
         """
         llc = hyperparams.loss_fn if target_low_loss else None
         self.make_poisoned_data_on(base_model, training_data, low_loss_criterion=llc)
@@ -264,16 +269,18 @@ def eval_perf_under_attack(
     and for each attack, compute a performance metric of each class on the test dataset.
 
     # Parameters
-    - `flip_proportion` : an array of poisoning rates to use for the attacks.
-    - `targets` : See `LabelFlippingAttack` for more info.
-    - `base_model` : a trained model to tune the attack on.
-    - `victim` : a (usually untrained) model to be trained on a poisoned dataset.
-    - `rounds` : The number of runs to repeat the attack.
+
+    - flip_proportion: an array of poisoning rates to use for the attacks.
+    - targets: see [`LabelFlippingAttack`] for more info.
+    - base_model: a **TRAINED** model to tune the attack on.
+    - victim: a (usually **UNTRAINED**) model to be trained on a poisoned dataset.
+    - rounds: The number of runs to repeat the attack.
     A higher number of rounds give more data points for the performance metric.
-    - `target_low_loss_criterion` : see `make_label_flipped_data`.
-    - `metric` : the performance metric. Individual F1-score by default.
+    - target_low_loss_criterion: see [`make_label_flipped_data`].
+    - metric: the performance metric. Individual F1-score by default.
 
     # Returns
+
     A dataframe of all the attacks with the parameters specified in the columns:
     `class`, `flip_proportion`, `<metric>`, `round` where `<metric>` is the value
     specified in the function arguments.
@@ -335,12 +342,12 @@ def eval_perf_many_under_attack(
         metric='f1_score',
     ):
     """
-    Evaluate the performance of many models under label flipping
+    Evaluate the performance of many UNTRAINED models under label flipping
     and combine the results into a new dataframe.
     
     A new column `victim` is added, equal to the index of the victim model in the list.
 
-    See `eval_perf_under_attack` for more information on the parameters.
+    See [`eval_perf_under_attack`] for more information on the parameters.
     """
     hp = hyperparams
     
