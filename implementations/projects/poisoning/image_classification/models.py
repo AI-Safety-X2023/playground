@@ -22,13 +22,13 @@ class ConvNet(nn.Module):
 
         # Parameters
 
-        - `image_size` : the number of pixels in the image
-        - `num_classes` : the number of classes for the classifier
-        - `num_image_channels` : 1 for a grayscale image, 3 for a RGB image
-        - `num_conv_layers` : the number of convolution layers, usually 1 or 2
-        - `hidden_layer_dim` : the dimension of the hidden layer in the classifier
-        - `batchnorm` : if `True`, add batch normalization after max pooling layers
-        - `dropout_rate` : if not `None`, add two dropout layers in the classifier with this rate
+        - image_size: the number of pixels in the image
+        - num_classes: the number of classes for the classifier
+        - num_image_channels: 1 for a grayscale image, 3 for a RGB image
+        - num_conv_layers: the number of convolution layers, usually 1 or 2
+        - hidden_layer_dim: the dimension of the hidden layer in the classifier
+        - batchnorm: if `True`, add batch normalization after max pooling layers
+        - dropout_rate: if not `None`, add two dropout layers in the classifier with this rate
         
         The default parameters are set for MNIST digits classification.
         """
@@ -90,7 +90,7 @@ class SmallCNN(ConvNet):
     """
     def __init__(self, hidden_layer_dim=64, batchnorm=True, dropout_rate=0.1, **kwargs):
         super().__init__(
-            num_conv_layers = 1,
+            num_conv_layers=1,
             hidden_layer_dim=hidden_layer_dim,
             batchnorm=batchnorm,
             dropout_rate=dropout_rate,
