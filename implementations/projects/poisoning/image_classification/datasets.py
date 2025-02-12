@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 from torch import Tensor
-from torchvision.datasets import VisionDataset, MNIST
-from torchvision.transforms.functional import to_tensor as image_to_tensor
+from torchvision.datasets import MNIST, CIFAR10
+import torchvision.transforms as T
 from torch.utils.data import Dataset, TensorDataset
 
 from .accel import BEST_DEVICE
@@ -48,10 +48,26 @@ class EagerDataset(TensorDataset):
         super().__init__(self.data, self.targets)
     
     @classmethod
-    def from_torchvision(cls, dataset: VisionDataset, device=BEST_DEVICE) -> "EagerDataset":
-        tensors = [image_to_tensor(img) for (img, _) in dataset]
+    def from_mnist(cls, dataset: MNIST, device=BEST_DEVICE) -> "EagerDataset":
+        data = dataset.data / 255.0
+        transform = T.Normalize((data.mean(dim=(0, 1, 2)),), (data.std(dim=(0, 1, 2)),))
+        tensors = [transform(img[None, :]) for img in data]
+        
         data = torch.stack(tensors)
         return cls(data, dataset.targets, dataset.classes, device)
+
+    @classmethod
+    def from_cifar10(cls, dataset: CIFAR10, device=BEST_DEVICE) -> "EagerDataset":
+        data = torch.tensor(dataset.data) / 255.0
+        targets = torch.tensor(dataset.targets)
+        transform = T.Compose([
+            T.ToTensor(),
+            T.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)) #((data.mean(dim=(0, 1, 2)),), (data.std(dim=(0, 1, 2)),)),
+        ])
+        tensors = [transform(img) for (img, _) in dataset]
+        
+        data = torch.stack(tensors)
+        return cls(data, targets, dataset.classes, device)
 
     def split(
             self,
@@ -75,14 +91,14 @@ def mnist_train_test(root='data') -> tuple[EagerDataset, EagerDataset]:
     """
     Returns the training set and the test set of the MNIST dataset.
     """
-    training_data = EagerDataset.from_torchvision(
+    training_data = EagerDataset.from_mnist(
         MNIST(
             root=root,
             train=True,
             download=True,
         ),
     )
-    test_data = EagerDataset.from_torchvision(
+    test_data = EagerDataset.from_mnist(
         MNIST(
             root=root,
             train=False,
@@ -91,6 +107,25 @@ def mnist_train_test(root='data') -> tuple[EagerDataset, EagerDataset]:
     )
     return training_data, test_data
 
+def cifar10_train_test(root='data') -> tuple[EagerDataset, EagerDataset]:
+    """
+    Returns the training set and the test set of the CIFAR10 dataset.
+    """
+    training_data = EagerDataset.from_cifar10(
+        CIFAR10(
+            root=root,
+            train=True,
+            download=True,
+        ),
+    )
+    test_data = EagerDataset.from_cifar10(
+        CIFAR10(
+            root=root,
+            train=False,
+            download=True,
+        ),
+    )
+    return training_data, test_data
 
 def class_weights(data: Dataset):
     """

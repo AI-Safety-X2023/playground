@@ -157,6 +157,7 @@ def gaussian_unlearning_score(
         X_b.requires_grad_(True)
 
         logits = model(X_b)
+        # This computes the loss for each element of X_b without reduction
         loss_b = loss_fn(logits, y_b)
 
         if not hasattr(loss_b, 'shape') or loss_b.shape == ():
