@@ -7,6 +7,39 @@ from torch import nn, Tensor
 from torch.utils.data import Dataset, DataLoader
 from .nn import Hyperparameters
 
+def predictions(model: nn.Module, data: Tensor, as_logits=False, hp=Hyperparameters()):
+    """
+    Returns the model predictions on `data` performed in small batches.
+
+    This function performs memory-constrained, batched inference.
+    """
+    model.eval()
+
+    loader = DataLoader(data, batch_size=hp.inference_batch_size)
+
+    # Perform inference on batches and collect results in a single tensor
+    # TODO: use torch.stack? problem with last batch which has different length
+    with torch.no_grad():
+        if not as_logits:
+            y_pred = torch.zeros(len(data))
+        else:
+            Xb, _ = next(iter(loader))
+            y = model(Xb[0:1])
+            num_classes = y.shape[1]
+
+            y_pred = torch.zeros((len(data), num_classes))
+        
+        i = 0
+        for X in loader:
+            with torch.autocast(device_type=X.device.type):
+                y_p = model(X).detach()
+            if not as_logits:
+                y_p = y_p.argmax(1)
+            y_pred[i : i + len(y_p)] = y_p
+            i += len(X)
+    
+    return y_pred
+
 def labels_and_predictions(
         model: nn.Module,
         dataset: Dataset,

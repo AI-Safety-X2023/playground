@@ -49,7 +49,7 @@ class EagerDataset(TensorDataset):
     
     @classmethod
     def from_mnist(cls, dataset: MNIST, device=BEST_DEVICE) -> "EagerDataset":
-        data = dataset.data / 255.0
+        data = dataset.data.detach() / 255.0
         transform = T.Normalize((data.mean(dim=(0, 1, 2)),), (data.std(dim=(0, 1, 2)),))
         tensors = [transform(img[None, :]) for img in data]
         
