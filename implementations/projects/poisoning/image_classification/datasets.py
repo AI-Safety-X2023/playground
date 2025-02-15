@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch import Tensor
 from torchvision.datasets import MNIST, CIFAR10
-import torchvision.transforms as T
+import torchvision.transforms.v2 as T
 from torch.utils.data import Dataset, TensorDataset
 
 from .accel import BEST_DEVICE
@@ -58,15 +58,16 @@ class EagerDataset(TensorDataset):
 
     @classmethod
     def from_cifar10(cls, dataset: CIFAR10, device=BEST_DEVICE) -> "EagerDataset":
-        data = torch.tensor(dataset.data) / 255.0
         targets = torch.tensor(dataset.targets)
+        
         transform = T.Compose([
-            T.ToTensor(),
+            T.ToImage(),
+            T.ToDtype(torch.float32, scale=True),
             T.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)) #((data.mean(dim=(0, 1, 2)),), (data.std(dim=(0, 1, 2)),)),
         ])
         tensors = [transform(img) for (img, _) in dataset]
-        
         data = torch.stack(tensors)
+
         return cls(data, targets, dataset.classes, device)
 
     def split(
