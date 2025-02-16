@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from torchvision.models import (
-    efficientnet_b0, efficientnet_b1, efficientnet_b2, efficientnet_b3, efficientnet_b4, efficientnet_b5,
-    squeezenet1_1, mobilenet_v3_small, mobilenet_v3_large,
-    resnet18, resnet34, resnet50, resnet101, resnet152
-)
+
+from .cifar_models.resnet import ResNet18, ResNet34, ResNet50, ResNet101, ResNet152
+from .cifar_models.mobilenet import MobileNetV2 as _MobileNetV2
+from .cifar_models.efficientnet import EfficientNetB0
+from .cifar_models.shufflenet import ShuffleNetV2 as _ShuffleNetV2
 
 class ConvNet(nn.Module):
     """
@@ -105,52 +105,52 @@ class SmallCNN(ConvNet):
 
 class ResNet(nn.Module):
     """
-    ResNet.
+    [ResNet](https://arxiv.org/abs/1512.03385).
     """
-    def __init__(self, num_layers=18, num_classes=10):
+    def __init__(self, num_layers=18, num_classes=10, **kwargs):
         super().__init__()
         models = {
-            18: resnet18,
-            34: resnet34,
-            50: resnet50,
-            101: resnet101,
-            152: resnet152,
+            18: ResNet18,
+            34: ResNet34,
+            50: ResNet50,
+            101: ResNet101,
+            152: ResNet152,
         }
         try:
             model = models[num_layers]
         except KeyError:
             raise ValueError(f"Invalid number of layers: {num_layers}. Expected value in {list(models)}")
-        self.resnet = model(num_classes=num_classes)
+        self.resnet = model(num_classes=num_classes, **kwargs)
     
     def forward(self, x):
         return self.resnet.forward(x).to('cpu')
 
-class MobileNetV3(nn.Module):
+class MobileNetV2(nn.Module):
     """
-    MobileNet v3.
+    MobileNet v2.
     """
-    def __init__(self, size: str = 'small', num_classes=10):
+    def __init__(self, size: str = 'small', num_classes=10, **kwargs):
         super().__init__()
         models = {
-            'small': mobilenet_v3_small,
-            'large': mobilenet_v3_large,
+            'small': _MobileNetV2,
+            #'large': mobilenet_v3_large,
         }
         try:
             fn = models[size]
         except KeyError:
             raise ValueError(f"Invalid size: {size}. Expected value in {list(models)}")
-        self.mobilenet = fn(num_classes=num_classes)
+        self.mobilenet = fn(num_classes=num_classes, **kwargs)
     
     def forward(self, x):
         return self.mobilenet.forward(x).to('cpu')
 
-class SqueezeNet1_1(nn.Module):
+class ShuffleNetV2(nn.Module):
     """
-    SqueezeNet v1.1.
+    ShuffleNet v2.
     """
-    def __init__(self, num_classes=10):
+    def __init__(self, size=0.5, num_classes=10, **kwargs):
         super().__init__()
-        self.squeezenet = squeezenet1_1(num_classes=num_classes)
+        self.squeezenet = _ShuffleNetV2(net_size=size, num_classes=num_classes, **kwargs)
     
     def forward(self, x):
         return self.squeezenet.forward(x).to('cpu')
@@ -159,21 +159,21 @@ class EfficientNet(nn.Module):
     """
     EfficientNet.
     """
-    def __init__(self, b=0, num_classes=10):
+    def __init__(self, b=0, num_classes=10, **kwargs):
         super().__init__()
         models = [
-            efficientnet_b0,
-            efficientnet_b1,
-            efficientnet_b2,
-            efficientnet_b3,
-            efficientnet_b4,
-            efficientnet_b5,
+            EfficientNetB0,
+            #efficientnet_b1,
+            #efficientnet_b2,
+            #efficientnet_b3,
+            #efficientnet_b4,
+            #efficientnet_b5,
         ]
         try:
             model = models[b]
         except KeyError:
             raise ValueError(f"Invalid EfficientNet size: {b}. Expected value in {list(range(0, 6))}")
-        self.resnet = model(num_classes=num_classes)
+        self.resnet = model(num_classes=num_classes, **kwargs)
     
     def forward(self, x):
         return self.resnet.forward(x).to('cpu')
