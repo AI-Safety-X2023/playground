@@ -67,8 +67,7 @@ class ConvNet(nn.Module):
         if dropout_rate is not None:
             self.classifier.append(nn.Dropout(dropout_rate))
         self.classifier.append(nn.Linear(hidden_layer_dim, num_classes))
-        
-
+    
     def forward(self, x):
         x = self.feature_extractor(x)
         x = torch.flatten(x, 1)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 from torch import Tensor
-from torchvision.datasets import MNIST, CIFAR10
+from torchvision.datasets import MNIST, CIFAR10, CIFAR100
 import torchvision.transforms.v2 as T
 from torch.utils.data import Dataset, TensorDataset
 
@@ -59,16 +59,53 @@ class EagerDataset(TensorDataset):
     @classmethod
     def from_cifar10(cls, dataset: CIFAR10, device=BEST_DEVICE) -> "EagerDataset":
         targets = torch.tensor(dataset.targets)
-        
+        data = dataset.data / 255.0
         transform = T.Compose([
             T.ToImage(),
             T.ToDtype(torch.float32, scale=True),
-            T.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)) #((data.mean(dim=(0, 1, 2)),), (data.std(dim=(0, 1, 2)),)),
+            T.Normalize((*data.mean(axis=(0, 1, 2)),), (*data.std(axis=(0, 1, 2)),)),
         ])
         tensors = [transform(img) for (img, _) in dataset]
         data = torch.stack(tensors)
 
         return cls(data, targets, dataset.classes, device)
+
+    @classmethod
+    def from_cifar100(cls, dataset: CIFAR100, device=BEST_DEVICE) -> "EagerDataset":
+        return cls.from_cifar10(dataset, device=device)
+
+    def _decode_image(
+            self, image: Tensor,
+            data_mean: tuple[int], data_std: list[int],
+        ) -> np.ndarray:
+        image = image.numpy(force=True)
+        # Unnormalize image to [0, 1]
+        mean = np.array(data_mean).reshape(3, 1, 1)
+        std = np.array(data_std).reshape(3, 1, 1)
+        image = (std * image) + mean
+        # Shuffle dimensions to channels-last format
+        return np.transpose(image, (1, 2, 0))
+    
+    def decode_cifar10_image(self, image: Tensor) -> np.ndarray:
+        """
+        Decode a CIFAR-10 image to a `matplotlib`-compatible format.
+        """
+        return self._decode_image(image, [0.4914, 0.4822, 0.4465], [0.247, 0.243, 0.261])
+
+    def decode_cifar100_image(self, image: Tensor) -> np.ndarray:
+        """
+        Decode a CIFAR-100 image to a `matplotlib`-compatible format.
+        """
+        return self._decode_image(image, [0.5071, 0.4866, 0.4409], [0.2673, 0.2564, 0.2762])
+        
+    def decode_target(self, label: Tensor | int) -> str:
+        """
+        Return the target label's class name in MNIST, CIFAR-10 or CIFAR-100.
+        """
+        if isinstance(label, Tensor):
+            label = label.item()
+        return self.classes[label]
+    
 
     def split(
             self,
@@ -110,7 +147,7 @@ def mnist_train_test(root='data') -> tuple[EagerDataset, EagerDataset]:
 
 def cifar10_train_test(root='data') -> tuple[EagerDataset, EagerDataset]:
     """
-    Returns the training set and the test set of the CIFAR10 dataset.
+    Returns the training set and the test set of the CIFAR-10 dataset.
     """
     training_data = EagerDataset.from_cifar10(
         CIFAR10(
@@ -121,6 +158,26 @@ def cifar10_train_test(root='data') -> tuple[EagerDataset, EagerDataset]:
     )
     test_data = EagerDataset.from_cifar10(
         CIFAR10(
+            root=root,
+            train=False,
+            download=True,
+        ),
+    )
+    return training_data, test_data
+
+def cifar100_train_test(root='data') -> tuple[EagerDataset, EagerDataset]:
+    """
+    Returns the training set and the test set of the CIFAR-100 dataset.
+    """
+    training_data = EagerDataset.from_cifar100(
+        CIFAR100(
+            root=root,
+            train=True,
+            download=True,
+        ),
+    )
+    test_data = EagerDataset.from_cifar100(
+        CIFAR100(
             root=root,
             train=False,
             download=True,
