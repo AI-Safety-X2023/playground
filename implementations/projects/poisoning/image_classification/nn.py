@@ -18,7 +18,10 @@ from .utils import tqdm, trange
 
 class MetricLogger:
     def __init__(self, *metrics, desc='Train loop', total: int = None, keep_pbars=True):
-        self.metrics = [metric for metric in metrics if metric is not None]
+        self.metrics = {
+            metric._get_name(): metric
+            for metric in metrics if metric is not None
+        }
         self.avg_loss = MeanMetric()
 
         # Make a nice progress bar
@@ -33,8 +36,8 @@ class MetricLogger:
         ) -> dict[str, Metric]:
         self.avg_loss(loss)
         metric_values = {'avg_loss': self.avg_loss.compute().item()}
-        for metric in self.metrics:
-            metric_values[metric._get_name()] = metric(logits, y).item()
+        for name, metric in self.metrics.items():
+            metric_values[name] = metric(logits, y).item()
 
         self.pbar.n += len(X)
         self.pbar.set_postfix(**metric_values)
