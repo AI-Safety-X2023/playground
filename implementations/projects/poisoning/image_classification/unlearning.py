@@ -10,7 +10,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim import Optimizer, SGD
 
 from .utils import tqdm, trange
-from .nn import distillation_epoch, train_test_loop
+from .nn import MetricLogger, distillation_epoch, train_val_loop
 
 
 def model_layers(model: nn.Module, first: int, last: int):
@@ -50,7 +50,7 @@ def unlearning_last_layers(model: nn.Module, k: int, mode='cfk'):
 
     ```python
     with unlearning_last_layers(model, 3, mode='euk'):
-        train_test_loop(model, ...)
+        train_val_loop(model, ...)
     ```
     """
     def _set_layer_grad_updates(layer: nn.Module, grad: bool):
@@ -81,7 +81,7 @@ def unlearning_last_layers(model: nn.Module, k: int, mode='cfk'):
 def gradient_descent(
         model: nn.Module,
         retain_loader: DataLoader,
-        test_loader: DataLoader,
+        val_loader: DataLoader,
         loss_fn: _Loss,
         optimizer: SGD,
         epochs: int,
@@ -93,17 +93,18 @@ def gradient_descent(
     Simply perform gradient descent on the retain set (Neel et al.)\\
     https://arxiv.org/abs/2007.02923
     """
-    return train_test_loop(
+    return train_val_loop(
         model,
-        retain_loader, test_loader,
+        retain_loader, val_loader,
         loss_fn, optimizer, epochs,
+        early_stopping=False,
         **kwargs,
     )
 
 def gradient_ascent(
         model: nn.Module,
         forget_loader: DataLoader,
-        test_loader: DataLoader,
+        val_loader: DataLoader,
         loss_fn: _Loss,
         optimizer: SGD,
         epochs: int,
@@ -116,10 +117,11 @@ def gradient_ascent(
     https://arxiv.org/abs/2210.01504
     """
     criterion = lambda y, y_true: -loss_fn(y, y_true)
-    return train_test_loop(
+    return train_val_loop(
         model,
-        forget_loader, test_loader,
+        forget_loader, val_loader,
         criterion, optimizer, epochs,
+        early_stopping=False,
         **kwargs,
     )
 
@@ -184,7 +186,9 @@ def neg_grad_plus(
     """
     model.train()
 
-    pbar = tqdm(desc='NegGrad+', total=len(forget.dataset), leave=keep_pbars)
+    logger = MetricLogger(
+        desc='NegGrad+', total=len(forget.dataset), keep_pbars=keep_pbars,
+    )
     
     # This prevents errors in case `retain` has less many elements than `forget`.
     # Usually not needed.
@@ -205,17 +209,9 @@ def neg_grad_plus(
         optimizer.step()
         optimizer.zero_grad()
 
-        pbar.n += len(X_f)
-        pbar.set_postfix(
-            loss=loss.item(),
-            loss_retain=loss_r.item(),
-            loss_forget=loss_f.item(),
-        )
+        logger.compute_metrics(X_f, y_f, None, loss.item())
     
-    if keep_pbars:
-        # Fixes a bug where the HTML output does not survive after closing notebook
-        print(pbar)
-    pbar.close()
+    logger.finish()
 
 
 def oracle_unlearning(
@@ -236,8 +232,9 @@ def oracle_unlearning(
     """
     model.train()
 
-    pbar = tqdm(desc='Oracle unlearning', total=len(forget.dataset), leave=keep_pbars)
-
+    logger = MetricLogger(
+        desc='OracleUnlearning', total=len(forget.dataset), keep_pbars=keep_pbars,
+    )
 
     # We perform the unlearning loop on all of the forget set.
     for (X_r, y_r), (X_f, y_f) in zip(forget_uncorrupted, forget):
@@ -253,17 +250,9 @@ def oracle_unlearning(
         optimizer.step()
         optimizer.zero_grad()
 
-        pbar.n += len(X_f)
-        pbar.set_postfix(
-            loss=loss.item(),
-            loss_retain=loss_r.item(),
-            loss_forget=loss_f.item(),
-        )
+        logger.compute_metrics(X_f, y_f, None, loss.item())
     
-    if keep_pbars:
-        # Fixes a bug where the HTML output does not survive after closing notebook
-        print(pbar)
-    pbar.close()
+    logger.finish()
 
 
 def scrub_unlearning_epoch(

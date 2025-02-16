@@ -4,16 +4,49 @@ import dataclasses
 from dataclasses import dataclass
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.modules.loss import _Loss, _WeightedLoss
 from torch.optim import Optimizer, AdamW
+from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import Dataset, DataLoader
-from torchmetrics import Metric, Accuracy
+from torchmetrics import Metric, Accuracy, MeanMetric
 
 from .datasets import class_weights
 from .utils import tqdm, trange
 
+
+class MetricLogger:
+    def __init__(self, *metrics, desc='Train loop', total: int = None, keep_pbars=True):
+        self.metrics = [metric for metric in metrics if metric is not None]
+        self.avg_loss = MeanMetric()
+
+        # Make a nice progress bar
+        self.pbar = tqdm(desc=desc, total=total, leave=keep_pbars)
+        # Forces storage of description even if progress bar is disabled
+        self.pbar.desc = desc or ''
+        
+
+    def compute_metrics(
+            self,
+            X: Tensor, y: Tensor, logits: Tensor, loss: float,
+        ) -> dict[str, Metric]:
+        self.avg_loss(loss)
+        metric_values = {'avg_loss': self.avg_loss.compute().item()}
+        for metric in self.metrics:
+            metric_values[metric._get_name()] = metric(logits, y).item()
+
+        self.pbar.n += len(X)
+        self.pbar.set_postfix(**metric_values)
+
+    def finish(self):            
+        if self.pbar.leave:
+            # Fixes a bug where the HTML output does not survive after closing notebook
+            print(self.pbar)
+            if self.pbar.disable:
+                # Fixes a bug in tqdm: pbar info is not displayed
+                print(f'{self.pbar.desc}\t-', self.pbar.postfix)
+        self.pbar.close()
 
 def train_epoch(
         model: nn.Module,
@@ -26,8 +59,12 @@ def train_epoch(
     #optimizer.zero_grad()
     # Set the model to training mode - important for batch normalization and dropout layers
     model.train()
-    # Make a nice progress bar
-    pbar = tqdm(desc='Train loop', total=len(dataloader.dataset), leave=keep_pbars)
+
+    logger = MetricLogger(
+        metric,
+        desc='Train loop', total=len(dataloader.dataset), keep_pbars=keep_pbars,
+    )
+
     for X, y in dataloader:
         # Compute prediction and loss
         logits = model(X)
@@ -38,13 +75,10 @@ def train_epoch(
         optimizer.step()
         optimizer.zero_grad()
 
-        pbar.n += len(X)
-        pbar.set_postfix(loss=loss.item())
+        logger.compute_metrics(X, y, logits, loss.item())
     
-    if keep_pbars:
-        # Fixes a bug where the HTML output does not survive after closing notebook
-        print(pbar)
-    pbar.close()
+    logger.finish()
+    return logger
 
 def test_epoch(
         model: nn.Module,
@@ -55,34 +89,23 @@ def test_epoch(
     ):
     # Set the model to evaluation mode - important for batch normalization and dropout layers
     model.eval()
-    test_loss = 0.0
-    # Make a nice progress bar
-    pbar = tqdm(desc='Test loop', total=len(dataloader.dataset), leave=keep_pbars)
+    
+    logger = MetricLogger(
+        metric,
+        desc='Test epoch', total=len(dataloader.dataset), keep_pbars=keep_pbars,
+    )
 
     # Evaluating the model with torch.no_grad() ensures that no gradients are computed during test mode
     # also serves to reduce unnecessary gradient computations and memory usage for tensors with requires_grad=True
     with torch.no_grad():
-        for i, (X, y) in enumerate(dataloader):
+        for (X, y) in dataloader:
             logits = model(X)
             loss = loss_fn(logits, y).item()
-            test_loss += loss
 
-            metrics = {}
-            if metric is not None:
-                metric_name = metric._get_name()
-                metric_on_batch = metric(logits, y).item()
-                metrics[metric_name] = metric_on_batch
+            logger.compute_metrics(X, y, logits, loss)
 
-            pbar.n += len(X)
-            pbar.set_postfix(
-                **metrics,
-                avg_loss=(test_loss / (i + 1)),
-            )
-
-    if keep_pbars:
-        # Fixes a bug where the HTML output does not survive after closing notebook
-        print(pbar)
-    pbar.close()
+    logger.finish()
+    return logger
 
 def train_loop(
         model: nn.Module,
@@ -90,13 +113,15 @@ def train_loop(
         loss_fn: _Loss,
         optimizer: Optimizer,
         epochs: int,
+        *,
+        lr_scheduler: LRScheduler = None,
         keep_pbars=True,
         metric: Metric = None,
     ):
     """
     Run the training loop on the model without testing.
     """
-    for _ in trange(epochs, desc='Train epochs', unit='epoch', leave=keep_pbars):
+    for epoch in trange(epochs, desc='Train epochs', unit='epoch', leave=keep_pbars):
         train_epoch(
             model,
             train_dataloader,
@@ -104,25 +129,48 @@ def train_loop(
             keep_pbars=keep_pbars,
             metric=metric,
         )
+        if lr_scheduler is not None:
+            lr_scheduler.step()
 
-def train_test_loop(
+def train_val_loop(
         model: nn.Module,
         train_dataloader: DataLoader,
-        test_dataloader: DataLoader,
+        val_dataloader: DataLoader,
         loss_fn: _Loss,
         optimizer: Optimizer,
         epochs: int,
+        *,
+        lr_scheduler: LRScheduler = None,
         keep_pbars=True,
         metric: Metric = None,
+        validate_every: int = 2,
+        early_stopping = True,
     ):
     """
-    Run the training and testing loop on the model.
+    Run the training loop on the model with periodic validation.
 
-    If `test_dataloader` is `None`, no testing is performed after training.
+    If `val_dataloader` is `None`, no validation is performed.
+
+    If `early_stopping` is True, the training loop exits when validation loss starts decreasing.
     """
-    for _ in trange(epochs, desc='Train epochs', unit='epoch', leave=keep_pbars):
-        train_epoch(model, train_dataloader, loss_fn, optimizer, keep_pbars=keep_pbars)
-        test_epoch(model, test_dataloader, loss_fn, keep_pbars=keep_pbars, metric=metric)
+    val_loss = float('inf')
+    for epoch in trange(epochs, desc='Train epochs', unit='epoch', leave=keep_pbars):
+        train_epoch(
+            model, train_dataloader, loss_fn, optimizer,
+            keep_pbars=keep_pbars, metric=metric,
+        )
+        if lr_scheduler is not None:
+            lr_scheduler.step()
+        if val_dataloader is not None and epoch % validate_every == 0:
+            logger = test_epoch(
+                model, val_dataloader, loss_fn,
+                keep_pbars=keep_pbars, metric=metric,
+            )
+            next_val_loss = logger.avg_loss.compute()
+            if early_stopping and next_val_loss > val_loss:
+                print(f"Epoch {epoch}: validation loss stopped improving, exiting train loop.")
+                break
+            val_loss = next_val_loss
 
 
 def distillation_epoch(
@@ -148,10 +196,8 @@ def distillation_epoch(
     student.train()
     teacher.eval()
 
-    pbar = tqdm(
-        desc='Transfer learning epoch',
-        total=len(dataloader.dataset),
-        leave=keep_pbars,
+    logger = MetricLogger(
+        desc='Transfer learning epoch', total=len(dataloader.dataset), keep_pbars=keep_pbars,
     )
 
     for X, target in dataloader:
@@ -166,13 +212,9 @@ def distillation_epoch(
         optimizer.step()
         optimizer.zero_grad()
 
-        pbar.n += len(X)
-        pbar.set_postfix(loss=loss.item())
+        logger.compute_metrics(X, target, logits_student, loss)
 
-    if keep_pbars:
-        # Fixes a bug where the HTML output does not survive after closing notebook
-        print(pbar)
-    pbar.close()
+    logger.finish()
 
 
 
@@ -195,8 +237,8 @@ class Hyperparameters:
     hp = Hyperparameters()
     hp.optimizer_params.lr = 1e-4
 
-    train_test_loop(
-        model, train_loader, test_loader,
+    train_val_loop(
+        model, train_loader, val_loader,
         hp.train_test_params(model),
     )
     ```
@@ -249,7 +291,7 @@ class Hyperparameters:
         ) -> dict:
         """
         A utility function that returns appropriate keyword hyperparameters
-        for training a model with `train_test_loop`.
+        for training a model with `train_val_loop`.
         
         The hyperparameters can be adjusted according to the keyword arguments
         to this function.
