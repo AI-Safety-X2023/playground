@@ -260,6 +260,7 @@ def scrub_unlearning_epoch(
         student: nn.Module,
         forget: DataLoader,
         optimizer: Optimizer,
+        beta=0.01,
         keep_pbars=True,
     ):
     """
@@ -270,7 +271,7 @@ def scrub_unlearning_epoch(
         # The output is assumed to be unnormalized (positive or negative).
         # FIXME: this requires some output regularization to avoid overflow.
         kl = F.kl_div(logits_student, logits_teacher, log_target=True, reduction='mean')
-        return -kl
+        return - beta * kl
     
     return distillation_epoch(
         teacher, student,
@@ -286,8 +287,8 @@ def scrub_learning_epoch(
         retain: DataLoader,
         loss_fn: _Loss,
         optimizer: Optimizer,
-        alpha: float,
-        gamma: float,
+        alpha=0.1,
+        gamma=0.9,
         keep_pbars=True,
     ):
     """
@@ -318,8 +319,9 @@ def scrub(
         optimizer: Optimizer,
         max_steps: int,
         steps: int,
-        alpha=0.999,
-        gamma=0.99,
+        alpha=0.1,
+        beta=0.01,
+        gamma=0.9,
         keep_pbars=True,
     ):
     """
@@ -343,6 +345,7 @@ def scrub(
                 teacher, student,
                 forget,
                 optimizer,
+                beta,
                 keep_pbars,
             )
         scrub_learning_epoch(
