@@ -1,3 +1,3 @@
-Création du dossier deeplearning sur rouloul
-Implémentation du tutoriel de huggingFace sur le fine tuning, choix d'utiliser les trainers pour plus de simplicité pour l'instant
-  
+Création du dossier deeplearning sur rouloul, voir : https://wikix.polytechnique.org/Deep_learning_en_salle_info
+Implémentation du tutoriel de huggingFace sur le fine tuning, choix d'utiliser les trainers pour plus de simplicité pour l'instant, voir : https://huggingface.co/docs/transformers/en/training#train-with-pytorch-trainer
+ 
