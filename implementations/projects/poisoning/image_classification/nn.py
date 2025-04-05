@@ -3,6 +3,7 @@ from copy import deepcopy
 import dataclasses
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 from torch import Tensor, nn
 from torch.nn import CrossEntropyLoss
@@ -12,17 +13,22 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import Dataset, DataLoader
 from torchmetrics import Metric, Accuracy, MeanMetric
 
+from .accel import BEST_DEVICE
 from .datasets import class_weights
 from .utils import tqdm, trange
 
 
 class MetricLogger:
-    def __init__(self, *metrics, desc='Train loop', total: int = None, keep_pbars=True):
+    def __init__(
+            self, *metrics,
+            device=BEST_DEVICE,
+            desc='Train loop', total: int = None, keep_pbars=True
+        ):
         self.metrics = {
-            metric._get_name(): metric
+            metric._get_name(): metric.to(device)
             for metric in metrics if metric is not None
         }
-        self.avg_loss = MeanMetric()
+        self.avg_loss = MeanMetric().to(device)
 
         # Make a nice progress bar
         self.pbar = tqdm(desc=desc, total=total, leave=keep_pbars)
@@ -51,6 +57,9 @@ class MetricLogger:
                 print(f'{self.pbar.desc}\t-', self.pbar.postfix)
         self.pbar.close()
 
+def _detect_device(model: nn.Module) -> torch.device:
+    return next(model.parameters()).device
+
 def train_epoch(
         model: nn.Module,
         dataloader: DataLoader,
@@ -59,6 +68,7 @@ def train_epoch(
         keep_pbars=True,
         metric: Metric = None,
     ):
+    device = _detect_device(model)
     #optimizer.zero_grad()
     # Set the model to training mode - important for batch normalization and dropout layers
     model.train()
@@ -69,6 +79,7 @@ def train_epoch(
     )
 
     for X, y in dataloader:
+        X, y = X.to(device), y.to(device)
         # Compute prediction and loss
         logits = model(X)
         loss = loss_fn(logits, y)
@@ -90,6 +101,7 @@ def test_epoch(
         keep_pbars=False,
         metric: Metric = None,
     ):
+    device = _detect_device(model)
     # Set the model to evaluation mode - important for batch normalization and dropout layers
     model.eval()
     
@@ -102,6 +114,7 @@ def test_epoch(
     # also serves to reduce unnecessary gradient computations and memory usage for tensors with requires_grad=True
     with torch.no_grad():
         for (X, y) in dataloader:
+            X, y = X.to(device), y.to(device)    
             logits = model(X)
             loss = loss_fn(logits, y).item()
 
@@ -323,3 +336,58 @@ def set_loss_weights(loss: _WeightedLoss, dataset: Dataset):
     """
     _, counts = class_weights(dataset)
     loss.weight = counts.min() / torch.tensor(counts)
+
+
+def find_lr(
+        model: nn.Module,
+        criterion: _Loss,
+        optimizer: Optimizer,
+        train_loader: DataLoader,
+        *,
+        init_value = 1e-6,
+        final_value=1.,
+        beta = 0.98,
+    ):
+    """
+    Find a good learning rate for the optimizer.
+
+    The learning rate is store in the optimizer parameters.
+    """
+    # https://sgugger.github.io/how-do-you-find-a-good-learning-rate.html
+    num = len(train_loader) - 1
+    mult = (final_value / init_value) ** (1 / num)
+    lr = init_value
+    optimizer.param_groups[0]['lr'] = lr
+    avg_loss = 0.
+    best_loss = 0.
+    batch_num = 0
+    losses = []
+    log_lrs = []
+    for X, y in train_loader:
+        batch_num += 1
+        # Get the loss for this mini-batch of inputs/outputs
+        optimizer.zero_grad()
+        outputs = model(X)
+        loss = criterion(outputs, y)
+
+        # Compute the smoothed loss
+        avg_loss = beta * avg_loss + (1 - beta) *loss.data[0]
+        smoothed_loss = avg_loss / (1 - beta**batch_num)
+        # Stop if the loss is exploding
+        if batch_num > 1 and smoothed_loss > 4 * best_loss:
+            return log_lrs, losses
+        # Record the best loss
+        if smoothed_loss < best_loss or batch_num==1:
+            best_loss = smoothed_loss
+        # Store the values
+        losses.append(smoothed_loss)
+        log_lrs.append(np.log10(lr))
+
+        # Do the SGD step
+        loss.backward()
+        optimizer.step()
+
+        #Update the lr for the next step
+        lr *= mult
+        optimizer.param_groups[0]['lr'] = lr
+    return log_lrs, losses

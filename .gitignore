@@ -1,6 +1,8 @@
 implementations/projects/poisoning/data
 implementations/projects/poisoning/runs
 
+test_trainer
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

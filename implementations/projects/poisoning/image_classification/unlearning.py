@@ -10,7 +10,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim import Optimizer, SGD
 
 from .utils import tqdm, trange
-from .nn import MetricLogger, distillation_epoch, train_val_loop
+from .nn import MetricLogger, distillation_epoch, train_val_loop, _detect_device
 
 
 def model_layers(model: nn.Module, first: int, last: int):
@@ -184,6 +184,7 @@ def neg_grad_plus(
 
     Reference paper: https://arxiv.org/abs/2302.09880
     """
+    device = _detect_device(model)
     model.train()
 
     logger = MetricLogger(
@@ -197,6 +198,8 @@ def neg_grad_plus(
     # We perform the unlearning loop on all of the forget set.
     for X_f, y_f in forget:
         X_r, y_r = next(retain_iter)
+        X_r, y_r = X_r.to(device), y_r.to(device)
+        X_f, y_f = X_f.to(device), y_f.to(device)
 
         # Compute prediction and loss
         loss_f = loss_fn(model(X_f), y_f)

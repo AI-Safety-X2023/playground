@@ -6,6 +6,7 @@ import torch
 from torch import nn, Tensor
 from torch.nn.modules.loss import _Loss
 from torch.utils.data import Dataset, TensorDataset, Subset, DataLoader
+from .nn import _detect_device
 
 class GaussianPoisoningDataset(TensorDataset):
     """
@@ -139,6 +140,8 @@ def gaussian_unlearning_score(
     We follow the _Algorithm 3_ in the original paper of Pawelczyk et al:
     https://arxiv.org/abs/2406.17216
     """
+    device = _detect_device(model)
+
     if isinstance(loss_fn, _Loss) and loss_fn.reduction != 'none':
         raise ValueError(f'Expected no loss reduction, got `{loss_fn.reduction}`')
 
@@ -154,11 +157,12 @@ def gaussian_unlearning_score(
 
     # There is no memory leak since these dataloader have same length
     for (X_b, y_b), noise_b in zip(base_loader, noise_loader):
-        X_b.requires_grad_(True)
+        # Important: detach tensor to avoid grad accumulation
+        X_b = X_b.detach().to(device).requires_grad_(True)
 
         logits = model(X_b)
         # This computes the loss for each element of X_b without reduction
-        loss_b = loss_fn(logits, y_b)
+        loss_b = loss_fn(logits, y_b.to(device))
 
         if not hasattr(loss_b, 'shape') or loss_b.shape == ():
             raise ValueError(f'Expected a loss value per element, got a scalar')
@@ -170,12 +174,11 @@ def gaussian_unlearning_score(
             # TODO: find a way to perform batched propagation
             # This is inefficient because only X_b.grad[j] will be nonzero
             loss.backward()
-            xi = xi.flatten()
+            xi = xi.flatten().to(device)
             g = X_b.grad[j].flatten()
             g_n = g.norm()
             I_poison[i] = xi.dot(g) / (epsilon + noise_std * g_n)
             i += 1
-        
         X_b.requires_grad_(False)
 
-    return I_poison
+    return I_poison.to('cpu')
