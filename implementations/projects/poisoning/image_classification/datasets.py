@@ -9,6 +9,36 @@ from torch.utils.data import Dataset, TensorDataset
 
 from .accel import BEST_DEVICE
 
+class UpdatableDataset(Dataset):
+    """A list-like dataset."""
+    X: list[Tensor]
+    y: list[Tensor]
+
+    def __init__(self):
+        self.X = []
+        self.y = []
+
+    def __getitem__(self, index):
+        return self.X[index], self.y[index]
+    
+    def __len__(self):
+        return len(self.X)
+    
+    def append(self, X: Tensor, y: Tensor):
+        self.X.append(X)
+        self.y.append(y)
+    
+    def extend(self, dataset: Dataset):
+        for X, y in dataset:
+            self.append(X, y)
+    
+    def to_tensor_dataset(self) -> TensorDataset:
+        return TensorDataset(torch.stack(self.X), torch.stack(self.y))
+
+CIFAR10_MEAN = torch.tensor([0.4914, 0.4822, 0.4465])
+CIFAR10_STD = torch.tensor([0.247, 0.243, 0.261])
+CIFAR100_MEAN = torch.tensor([0.5071, 0.4866, 0.4409])
+CIFAR100_STD = torch.tensor([0.2673, 0.2564, 0.2762])
 
 class EagerDataset(TensorDataset):
     """
@@ -86,18 +116,66 @@ class EagerDataset(TensorDataset):
         # Shuffle dimensions to channels-last format
         return np.transpose(image, (1, 2, 0))
     
+    def data_stats(self) -> tuple[Tensor, Tensor]:
+        # FIXME: this is brittle
+        device = self.data.device
+        if len(self.classes) == 100 and self.data.shape[1] == 3:
+            return CIFAR10_MEAN.to(device), CIFAR10_STD.to(device)
+        elif len(self.classes) == 10 and self.data.shape[1] == 3:
+            return CIFAR100_MEAN.to(device), CIFAR100_STD.to(device)
+        else:
+            raise NotImplementedError("Data stats only implemented for CIFAR")
+
+    def data_range(self) -> tuple[Tensor, Tensor]:
+        """
+        Returns the min and max RGB values of the normalized dataset.
+        """
+        mean, std = self.data_stats()
+        min = (1. / 255. - mean) / std
+        max = (254. / 255. - mean) / std
+        return min, max
+    
+    def clip_to_data_range(self, X: Tensor, inplace=True) -> Tensor:
+        """Clip to valid image data range in place."""
+        min_, max_ = self.data_range()
+        device = X.device
+        min_ = min_.reshape(self.data.shape[1], 1, 1).to(device)
+        max_ = max_.reshape(self.data.shape[1], 1, 1).to(device)
+        if inplace:
+            return X.clamp_(min_, max_)
+        else:
+            return X.clamp(min_, max_)
+
+    def max_data_variation(self) -> Tensor:
+        min_, max_ = self.data_range()
+        return (max_ - min_).max()
+
     def decode_cifar10_image(self, image: Tensor) -> np.ndarray:
         """
         Decode a CIFAR-10 image to a `matplotlib`-compatible format.
         """
-        return self._decode_image(image, [0.4914, 0.4822, 0.4465], [0.247, 0.243, 0.261])
+        return self._decode_image(image, CIFAR10_MEAN, CIFAR10_STD)
 
     def decode_cifar100_image(self, image: Tensor) -> np.ndarray:
         """
         Decode a CIFAR-100 image to a `matplotlib`-compatible format.
         """
-        return self._decode_image(image, [0.5071, 0.4866, 0.4409], [0.2673, 0.2564, 0.2762])
-        
+        return self._decode_image(image, CIFAR100_MEAN, CIFAR10_STD)
+    
+    def random_image_noise(self) -> Tensor:
+        rand = torch.rand_like(self.data[0])
+        mean, std = self.data_stats()
+        mean = mean.reshape(rand.shape[0], 1, 1)
+        std = std.reshape(rand.shape[0], 1, 1)
+        return mean + std * rand
+
+    def random_label(self) -> Tensor:
+        return torch.randint_like(self.targets[0], len(self.classes))
+    
+    def random_sample_noise(self) -> tuple[Tensor, Tensor]:
+        """Generate a random sample `(X, y)` with uniformly sampled coordinates."""
+        return self.random_image_noise(), self.random_label()
+    
     def decode_target(self, label: Tensor | int) -> str:
         """
         Return the target label's class name in MNIST, CIFAR-10 or CIFAR-100.

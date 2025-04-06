@@ -18,11 +18,13 @@ def model_layers(model: nn.Module, first: int, last: int):
     Iterate on model layers from `first` to `last` (inclusive).
 
     `first` and `last` may be negative, for instance `-1` refers to the last layer.
+    Layers without parameters are not included.
     """
-    num_layers = sum(1 for _ in model.modules()) 
-    for (i, layer) in enumerate(model.modules()):
-        if num_layers - first <= i <= num_layers - last:
-            yield layer
+    # Don't include containers such as `Sequential` and activation layers
+    layers = [module for module in model.modules() if module._parameters]
+    if last == -1:
+        return iter(layers[first:])
+    return iter(layers[first:last])
 
 def forget_last_layers(model: nn.Module, k: int):
     for layer in model_layers(model, -k, -1):
