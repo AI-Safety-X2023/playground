@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from .cifar_models.resnet import ResNet18, ResNet34, ResNet50, ResNet101, ResNet152
 from .cifar_models.mobilenet import MobileNetV2 as _MobileNetV2
@@ -176,3 +177,23 @@ class EfficientNet(nn.Module):
     
     def forward(self, x):
         return self.resnet.forward(x).to('cpu')
+
+
+class ConvNet16(nn.Module):
+    """
+    A simple convolutional neural network for CIFAR-10.
+    """
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 32, 5, 2)
+        self.conv2 = nn.Conv2d(32, 64, 5, 2)
+        self.fc1 = nn.Linear(64, 512)
+        self.fc2 = nn.Linear(512, 64)
+        self.fc3 = nn.Linear(64, 10)
+    
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.fc3(x)
