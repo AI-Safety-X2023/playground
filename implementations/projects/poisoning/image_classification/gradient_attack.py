@@ -145,6 +145,18 @@ class SampleInitConstant(SampleInit):
         return self.X, self.y
 
 
+class PowerofTwoSchedule:
+    """An exponential schedule that fires every step that is a power of two.
+    
+    In the gradient inverting attack, the poisoned label is updated according to this schedule.
+    The update frequency decreases exponentially to ensure proper convergence.
+    This is necessary since label flipping is not a continuous operation.
+    """
+    def __call__(self, step: int) -> bool:
+        """Returns whether an update should be performed at this step."""
+        return step & (step - 1) == 0
+
+
 class GradientInverter:
     """Inverting gradient attack."""
     def __init__(
@@ -163,6 +175,46 @@ class GradientInverter:
         self.lr = lr
         self.sample_init = sample_init
     
+    def attack_objective(
+            self,
+            model_grad: Tensor,
+            avg_clean_grad: Tensor,
+            x_base: Tensor = None,
+        ) -> Tensor:
+        """Returns the adversary's objective to minimize."""
+        # FIXME: not reliable
+        training_data: EagerDataset = self.sample_init.dataset
+        max_data_variation = training_data.max_data_variation()
+
+        match self.method:
+            case GradientAttack.RECONSTRUCTION:
+                #TODO: compare cos_sim with distance squared
+                #TODO: (signed gradient updates) & learning rate decay (Geiping et al.)
+                loss_atk = 1.0 - torch.cosine_similarity(model_grad, avg_clean_grad, dim=0)
+
+            case GradientAttack.ASCENT:
+                cos_sim = torch.cosine_similarity(model_grad, avg_clean_grad, dim=0)
+                # dot product increases the gradient size but makes unalignment easier
+                #loss_atk = g_p.dot(avg_clean_gradient)
+                loss_atk = cos_sim
+            
+            case GradientAttack.ORTHOGONAL:
+                cos_sim = torch.cosine_similarity(model_grad, avg_clean_grad, dim=0)
+                loss_atk = cos_sim ** 2
+
+            case GradientAttack.LITTLE_IS_ENOUGH:
+                # See Algorithm 3 in https://arxiv.org/pdf/1902.06156
+                # Estimate per-coordinate gradient std dev. with GradientEstimator
+                raise NotImplementedError
+
+        if self.tv_coef:
+            assert x_base is not None
+            tv = total_variation(x_base.unsqueeze(0))
+            normalization = x_base.numel() * 4 * max_data_variation ** 2
+            loss_atk += self.tv_coef * tv / normalization
+        
+        return loss_atk
+    
     def attack(self, model: nn.Module, criterion: _Loss) -> tuple[Tensor, Tensor]:
         """
         Create a poisoned data point with an inverting gradient attack.
@@ -176,9 +228,8 @@ class GradientInverter:
         # FIXME: not reliable
         training_data: EagerDataset = self.sample_init.dataset
         num_classes = len(training_data.classes)
-        max_data_variation = training_data.max_data_variation()
-
         device = _detect_device(model)
+
         avg_clean_gradient = self.estimator.average_clean_gradient(model, criterion)
         avg_clean_gradient.requires_grad_(False)
         
@@ -188,68 +239,68 @@ class GradientInverter:
         model.requires_grad_()
         model.zero_grad()
 
-        # TODO: implement random restarts if sampling is not constant
         x_base, y_base = self.sample_init()
+        
         x_base = x_base.to(device)
         y_base = F.one_hot(y_base, num_classes).float().to(device)
-        # We optimize on both the image and the label (as a logit vector)
-        opt = Adam([x_base, y_base], lr=self.lr)
+        # We optimize on the image...
+        opt = Adam([x_base], lr=self.lr)
+        # ...and occasionally on the label.
+        label_update_schedule = PowerofTwoSchedule()
 
-        for _step in range(self.steps):
-            # FIXME: seems necessary but `criterion` gradients only need be computed for `model`
+        for step in range(self.steps):
             x_base.requires_grad_(True)
             y_base.requires_grad_(True)
 
-            loss = criterion(model(x_base.unsqueeze(0)).squeeze(), y_base)
+            # --I--
+            y_pred = model(x_base.unsqueeze(0)).squeeze()
+            loss = criterion(y_pred, y_base)
             loss.backward(create_graph=True) # Allows 2nd-order differentiation
-
-            # TODO: gradients per parameter instead & weighted cosine similarity?
-            g_p = model_gradients(model)
-
-            match self.method:
-                case GradientAttack.RECONSTRUCTION:
-                    #loss_adv = (g_p - avg_clean_gradient).norm() ** 2
-                    #TODO: (signed gradient updates) & learning rate decay (Geiping et al.)
-                    loss_adv = 1.0 - torch.cosine_similarity(g_p, avg_clean_gradient, dim=0)
-
-                case GradientAttack.ASCENT:
-                    cos_sim = torch.cosine_similarity(g_p, avg_clean_gradient, dim=0)
-                    # dot product increases the gradient size but makes unalignment easier
-                    #loss_adv = g_p.dot(avg_clean_gradient)
-                    loss_adv = cos_sim
-                
-                case GradientAttack.ORTHOGONAL:
-                    cos_sim = torch.cosine_similarity(g_p, avg_clean_gradient, dim=0)
-                    loss_adv = cos_sim ** 2
-
-                case GradientAttack.LITTLE_IS_ENOUGH:
-                    # See Algorithm 3 in https://arxiv.org/pdf/1902.06156
-                    # Estimate per-coordinate gradient std dev. with GradientEstimator
-                    raise NotImplementedError
-
-            if self.tv_coef:
-                tv = total_variation(x_base.unsqueeze(0))
-                normalization = x_base.numel() * 4 * max_data_variation ** 2
-                loss_adv += self.tv_coef * tv / normalization
-
-            #print(f"Inverting gradient step {step}: loss = {loss.item()}, cos_sim = {cos_sim.item()}")
-            # Clear `loss` gradients on `x_base` and `y_base`
+            
+            loss_atk = self.attack_objective(
+                model_gradients(model),
+                avg_clean_gradient,
+                x_base,
+            )
+            #print(f"Inverting gradient step {step}: loss = {loss.item()}, loss_atk = {loss_atk.item()}")
+            # Clear `loss` gradients on `x_base`
             opt.zero_grad()
 
             # TODO: improve efficiency, e.g with torch.autograd
-            # Optimize `x_base`, `y_base`
-            loss_adv.backward()
+            # Optimize `x_base`
+            loss_atk.backward()
             opt.step()
             opt.zero_grad()
             model.zero_grad()
 
-            #x_base.requires_grad_(False)
-            #y_base.requires_grad_(False)
+            # Avoids autograd graph errors when modifying tensor in-place
+            x_base.requires_grad_(False)
             # Projected optimization algorithm
             training_data.clip_to_data_range(x_base, inplace=True)
+            
+            # --II---
+            if label_update_schedule(step):
+                # Instead of optimal label flipping (as in https://arxiv.org/abs/2503.00140),
+                # we guess the best class based on `loss_atk` gradients w.r.t y
+                # Efficiency is key when the number of classes grows
+                y_candidate = F.one_hot(y_base.grad.argmin(), num_classes).float()
+                y_pred = model(x_base.unsqueeze(0)).squeeze()
+                loss = criterion(y_pred, y_candidate)
+                loss.backward()
+                loss_atk_2 = self.attack_objective(
+                    model_gradients(model),
+                    avg_clean_gradient,
+                    x_base,
+                )
+                # Change the class if it improves the adversary's objective
+                if loss_atk_2 < loss_atk:
+                    y_base = y_candidate
         
-        # Take the softmax output as the one-hot label (Zhu et al., Deep Leakage from Gradients)
-        y_base = y_base.argmax()
+            y_base.requires_grad_(False)
+            y_base.grad = None
+            model.zero_grad()
+
+
         return x_base, y_base
 
 
