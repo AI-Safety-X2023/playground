@@ -10,3 +10,4 @@ torchvision
 tensorboard
 torchmetrics
 torchinfo
+torchjd
