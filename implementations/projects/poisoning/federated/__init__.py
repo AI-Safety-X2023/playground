@@ -3,6 +3,7 @@ from warnings import deprecated
 
 import torch
 from torch import nn, Tensor
+from torch.nn import functional as F
 from torch.nn.modules.loss import _Loss
 from torch.func import functional_call, vmap, grad
 
@@ -24,8 +25,25 @@ class Mean(Aggregator):
 
  
 class Krum(Aggregator):
+    def __init__(self, num_byzantine: int, num_selected: int = 1):
+        self.num_byzantine = num_byzantine
+        self.num_selected = num_selected
+    
+    def weights(self, matrix: Tensor) -> Tensor:
+        distances = torch.cdist(matrix, matrix, compute_mode="donot_use_mm_for_euclid_dist")
+        n_closest = matrix.shape[0] - self.num_byzantine - 2
+        smallest_distances, _ = torch.topk(distances, k=n_closest + 1, largest=False)
+        smallest_distances_excluding_self = smallest_distances[:, 1:]
+        scores = smallest_distances_excluding_self.sum(dim=1)
+
+        _, selected_indices = torch.topk(scores, k=self.num_selected, largest=False)
+        one_hot_selected_indices = F.one_hot(selected_indices, num_classes=matrix.shape[0])
+        weights = one_hot_selected_indices.sum(dim=0).to(dtype=matrix.dtype) / self.num_selected
+
+        return weights
+    
     def forward(self, matrix: Tensor) -> Tensor:
-        raise NotImplementedError    
+        return self.weights(matrix) @ matrix
 
 
 
