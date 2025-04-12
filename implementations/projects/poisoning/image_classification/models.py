@@ -73,8 +73,7 @@ class ConvNet(nn.Module):
         x = self.feature_extractor(x)
         x = torch.flatten(x, 1)
         x = self.classifier(x)
-        # Convert back logits to CPU for easier data manipulation
-        return x.to('cpu')
+        return x
     
 class BigCNN(ConvNet):
     """
@@ -123,7 +122,7 @@ class ResNet(nn.Module):
         self.resnet = model(num_classes=num_classes, **kwargs)
     
     def forward(self, x):
-        return self.resnet.forward(x).to('cpu')
+        return self.resnet.forward(x)
 
 class MobileNetV2(nn.Module):
     """
@@ -142,7 +141,7 @@ class MobileNetV2(nn.Module):
         self.mobilenet = fn(num_classes=num_classes, **kwargs)
     
     def forward(self, x):
-        return self.mobilenet.forward(x).to('cpu')
+        return self.mobilenet.forward(x)
 
 class ShuffleNetV2(nn.Module):
     """
@@ -150,10 +149,10 @@ class ShuffleNetV2(nn.Module):
     """
     def __init__(self, size=0.5, num_classes=10, **kwargs):
         super().__init__()
-        self.squeezenet = _ShuffleNetV2(net_size=size, num_classes=num_classes, **kwargs)
+        self.shufflenet = _ShuffleNetV2(net_size=size, num_classes=num_classes, **kwargs)
     
     def forward(self, x):
-        return self.squeezenet.forward(x).to('cpu')
+        return self.shufflenet.forward(x)
 
 class EfficientNet(nn.Module):
     """
@@ -176,7 +175,7 @@ class EfficientNet(nn.Module):
         self.resnet = model(num_classes=num_classes, **kwargs)
     
     def forward(self, x):
-        return self.resnet.forward(x).to('cpu')
+        return self.resnet.forward(x)
 
 
 class ConvNet16(nn.Module):
@@ -186,7 +185,7 @@ class ConvNet16(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv2d(3, 32, 5, 2)
-        self.conv2 = nn.Conv2d(32, 64, 5, 2)
+        self.conv2 = nn.Conv2d(3, 64, 5, 2)
         self.fc1 = nn.Linear(64, 512)
         self.fc2 = nn.Linear(512, 64)
         self.fc3 = nn.Linear(64, 10)
