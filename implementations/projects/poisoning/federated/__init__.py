@@ -5,8 +5,9 @@ import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
 from torch.nn.modules.loss import _Loss
-from torch.func import functional_call, vmap, grad
+import torch.func as ft
 
+from . import utils
 
 # Inspired by torchjd: https://torchjd.org
 class Aggregator(nn.Module, ABC):
@@ -20,16 +21,30 @@ class Aggregator(nn.Module, ABC):
 
 
 class Mean(Aggregator):
+    """Computes the coordinate-wise mean."""
     def forward(self, matrix: Tensor) -> Tensor:
         return matrix.mean(dim=0)
 
- 
+
+class Stddev(Aggregator):
+    """Computes the coordinate-wise standard deviation."""
+    def forward(self, matrix: Tensor) -> Tensor:
+        raise NotImplementedError
+
+
 class Krum(Aggregator):
+    """multi-KRUM."""
+
     def __init__(self, num_byzantine: int, num_selected: int = 1):
+        super().__init__()
+        assert num_byzantine >= 0 and num_selected >= 1
         self.num_byzantine = num_byzantine
         self.num_selected = num_selected
     
     def weights(self, matrix: Tensor) -> Tensor:
+        assert matrix.shape[0] >= self.num_byzantine + 3
+        assert matrix.shape[0] >= self.num_selected
+
         distances = torch.cdist(matrix, matrix, compute_mode="donot_use_mm_for_euclid_dist")
         n_closest = matrix.shape[0] - self.num_byzantine - 2
         smallest_distances, _ = torch.topk(distances, k=n_closest + 1, largest=False)
@@ -46,13 +61,48 @@ class Krum(Aggregator):
         return self.weights(matrix) @ matrix
 
 
+# TODO: improve memory consumption (delete original tensors?)
+def combine_jacobians(jacs: list[Tensor]) -> Tensor:
+    """Combine a list of unflattened jacobians into a single jacobian matrix.
+    
+    Parameters:
+        jacs (list of Tensor): a list of parameter jacobians. All of these jacobians
+            must have their first dimension length equal to the batch size.
+    
+    Returns:
+        matrix (Tensor): a combined 2D jacobian matrix.
+    """
+    return torch.cat([jac.flatten(start_dim=1) for jac in jacs], dim=1)
 
-def aggregate(grads: list[Tensor], aggregator: Aggregator) -> list[Tensor]:
-    """Aggregate batched gradients.
+def uncombine_gradients_like(combined_grad: Tensor, like_jacs: list[Tensor]) -> list[Tensor]:
+    """Split and reshape a combined gradient into a list of parameter gradients
+    with shapes given by a list of parameter jacobians.
 
-    Args:
-        grads (list of Tensor): a list of parameter gradients with their first dimension
-            equal to the batch size.
+    Parameters:
+        combined_grad (Tensor): the combined gradient, possibly obtained by
+            combining and aggregating `like_jacs`.
+        like_jacs (list of Tensor): reshape like this list of jacobians
+            (ignoring the batch size).
+    
+    Returns:
+        gradients (list of Tensor): a list of parameter gradients.    
+    """
+    param_shapes = [jac.shape[1:] for jac in like_jacs]
+    # Divide by the batch size
+    param_lengths = [jac.numel() // jac.shape[0] for jac in like_jacs]
+    return [
+        grad.reshape(shape)
+        for grad, shape in zip(combined_grad.split(param_lengths), param_shapes)
+    ]    
+
+
+def aggregate(jacs: list[Tensor], aggregator: Aggregator) -> list[Tensor]:
+    """Aggregate per-sample gradients.
+
+    Parameters:
+        jacs (list of Tensor): a list of parameter jacobians, i.e a list of tensors
+            with their first dimension equal to the batch size and the other dimensions
+            with the same shape as the parameters.
         aggregator (Aggregator): the gradient aggregation method.
 
     Returns:
@@ -62,41 +112,47 @@ def aggregate(grads: list[Tensor], aggregator: Aggregator) -> list[Tensor]:
     ```python
     grads = grad_batched(losses, model)
     grads = aggregate(grads)
-    ```    
+    ```
     """
-    assert all([grad.shape[0] == grads[0].shape[0] for grad in grads])
+    assert all([jac.shape[0] == jacs[0].shape[0] for jac in jacs])
 
-    # Save the parameter shapes
-    param_shapes = [grad.shape[1:] for grad in grads]
-    param_lengths = [grad.numel() // grad.shape[0] for grad in grads]
+    combined_jacs = combine_jacobians(jacs)
 
-    # Group the gradients into a batch of vectors (gradient matrix)
-    model_grad_b = torch.cat([grad.flatten(start_dim=1) for grad in grads], dim=1)
-
-    # Aggregate the gradients
-    model_grad = aggregator(model_grad_b)
-    del model_grad_b
+    combined_grad = aggregator(combined_jacs)
+    del combined_jacs
     
-    # Ungroup the parameter gradients
-    return [
-        grad.reshape(shape)
-        for grad, shape in zip(model_grad.split(param_lengths), param_shapes)
-    ]
-
+    return uncombine_gradients_like(combined_grad, jacs)
 
 # https://pytorch.org/tutorials/intermediate/per_sample_grads.html
-def per_sample_grads(model: nn.Module, X: Tensor, y: Tensor, criterion: _Loss) -> dict[str, Tensor]:
-    """Compute per-sample gradients.
+def per_sample_grads(
+        model: nn.Module,
+        X: Tensor,
+        y: Tensor,
+        criterion: _Loss,
+        store_in_params: bool = False,
+    ) -> dict[str, Tensor]:
+    """Compute per-sample gradients (jacobians).
 
-    Args:
+    Parameters:
         model (Module): a neural network that takes a batch in argument.
         X (Tensor): the batch inputs.
         y (Tensor): the batch targets.
-        criterion: the loss function without reduction.
+        criterion (loss): the loss function.
+        store_in_params (bool, defaults to False): whether to store
+            the per-sample gradients in the parameters `.grad` field.
 
     Returns:
         grads (dict): a dict of the gradients indexed by the parameter names.
     
+    **Important note**: the model must have `track_running_stats=False`
+    for each batch normalization layer to be compatible with `torch.func` AD.
+    This can be done automatically by calling `utils.disable_bn_modules` on your model.
+    However, disabling BN stats will incur a large drop in accuracy and will make
+    the model accuracy dependent on a single batch size. Alternatively, consider
+    replacing `BatchNorm` with `GroupNorm` using `utils.convert_bn_modules_to_gn`.
+    This change in architecture incurs a medium drop in speed but makes training
+    more robust to non i.i.d data and small batch sizes.
+
     Example:
     ```python
     grads = per_sample_grads(model, X, y, criterion)
@@ -105,33 +161,41 @@ def per_sample_grads(model: nn.Module, X: Tensor, y: Tensor, criterion: _Loss) -
         param.grad = grads[name].mean(dim=0)
     ```
     """
-    # https://pytorch.org/docs/2.6/func.batch_norm.html
-    # FIXME: ensure accuracy is not impacted
-    from torch.func import replace_all_batch_norm_modules_
-    replace_all_batch_norm_modules_(model)
 
-    _original_reduction = criterion.reduction
-    criterion.reduction = 'none'
-
-    # TODO: don't detach for performance?
+    # TODO: don't detach for performance? relevant with large models
     params = {k: v.detach() for k, v in model.named_parameters()}
     buffers = {k: v.detach() for k, v in model.named_buffers()}
 
-    def compute_loss(params, buffers, sample, target):
+    # A functional that computes the loss on a single sample, given model parameters.
+    def compute_loss(params: dict, buffers: dict, sample: Tensor, target: Tensor) -> Tensor:
+        # Unsqueeze since the model and the loss expect batches
         batch = sample.unsqueeze(0)
         targets = target.unsqueeze(0)
 
-        predictions = functional_call(model, (params, buffers), (batch,))
+        predictions = ft.functional_call(model, (params, buffers), (batch,))
+
         loss = criterion(predictions, targets)
-        return loss.squeeze()
+        if tuple(loss.shape) == (1,):
+            # Just in case loss.reduction == 'none'
+            loss = loss.squeeze()
+        else:
+            assert len(loss.shape) == 0
+        
+        return loss
 
-    ft_compute_grad = grad(compute_loss)
+    # A function that computes the loss gradients
+    ft_compute_grad = ft.grad(compute_loss)
+    # A function that computes the per-sample gradients on a batch
+    ft_compute_sample_grad = ft.vmap(ft_compute_grad, in_dims=(None, None, 0, 0))
 
-    ft_compute_sample_grad = vmap(ft_compute_grad, in_dims=(None, None, 0, 0))
+    grads: dict = ft_compute_sample_grad(params, buffers, X, y)
 
-    grads = ft_compute_sample_grad(params, buffers, X, y)
+    if store_in_params:
+        for (param, grad) in zip(model.parameters(), grads.values()):
+            # Store the jacobian matrix in the grad field
+            # TODO: detach_() to save memory??
+            param.grad = grad
 
-    criterion.reduction = _original_reduction
     return grads
 
 
@@ -145,50 +209,68 @@ def backpropagate_grads(
     This method is equivalent to calling `.backward()` on the computed loss,
     but allows any gradient aggregation method.
 
-    Args:
+    Parameters:
         model (Module): a neural network that takes a batch in argument.
         X (Tensor): the batch inputs.
         y (Tensor): the batch targets.
-        criterion: the loss function without reduction.
+        criterion: the loss function.
         aggregator (Aggregator): the gradient aggregation method.
+    
+    **Important note on batch normalization**: see `per_sample_grads`
+    for the requirement on `model`.
     """
     grads = per_sample_grads(model, X, y, criterion)
-
-
-    #-----
-    TEST = False
-    if TEST:
-        manual_grads = compute_sample_grads_naive(X, y)
-        for per_sample_grad, ft_per_sample_grad in zip(manual_grads, grads.values()):
-            # FIXME: this fails -> incorrect gradient calculation = drop in accuracy.
-            # This is not only due to batchnorm patching
-            assert torch.allclose(per_sample_grad, ft_per_sample_grad, rtol=1e-1)
-    #-----
-
-
-
     agg_grads = aggregate(list(grads.values()), aggregator)
 
     # The parameter order is preserved by dict
     for (param, grad) in zip(model.parameters(), agg_grads):
-            param.grad = grad
+        param.grad = grad
 
 
-def _compute_grad_naive(model, sample, target, criterion):
-    sample = sample.unsqueeze(0)  # prepend batch dimension for processing
-    target = target.unsqueeze(0)
+@deprecated("This is an internal test only intended for early iterations of the code.")
+def _print_autojac_error(
+        model: nn.Module,
+        X: Tensor, y: Tensor,
+        criterion: _Loss,
+    ):
+    """Print the errors of `per_sample_grads` compared to naive repeated AD on each sample.
 
-    prediction = model(sample)
-    loss = criterion(prediction, target)
+    This prints the accumulated errors for each parameter group.
+    """
 
-    return torch.autograd.grad(loss, list(model.parameters()))
+    grads = per_sample_grads(model, X, y, criterion)
+    manual_grads = compute_sample_grads_naive(model, X, y, criterion)
+    for jac, ft_jac in zip(manual_grads, grads.values()):
+        # NOTE: there is a ~1e-5 error in L^inf norm -> ~10 error in L^1
+        # This approximation error is hard to fix but does not seem to impact performance.
+        if not torch.allclose(jac, ft_jac, rtol=1e-1):
+            print('Error:')
+            print('grad shape', jac.shape)
+            print('cos_sim', F.cosine_similarity(jac.flatten(), ft_jac.flatten(), dim=0))
+            print('L^1', (jac - ft_jac).norm(1))
+            print('L^inf', (jac - ft_jac).abs().max())
+            print(
+                'max_rtol',
+                ((jac - ft_jac) / (jac + 1e-16)).abs().max()
+            )
+
 
 @deprecated("Naive gradient function. Use `per_sample_grads` instead.")
 def compute_sample_grads_naive(model, data, targets, criterion):
     """ manually process each sample with per sample gradient """
-    from torch.func import replace_all_batch_norm_modules_
-    replace_all_batch_norm_modules_(model)
-    sample_grads = [_compute_grad_naive(model, data[i], targets[i], criterion) for i in range(len(data))]
+    def _compute_grad_naive(model, sample, target, criterion):
+        sample = sample.unsqueeze(0)  # prepend batch dimension for processing
+        target = target.unsqueeze(0)
+
+        prediction = model(sample)
+        loss = criterion(prediction, target)
+
+        return torch.autograd.grad(loss, list(model.parameters()))
+
+    sample_grads = [
+        _compute_grad_naive(model, data[i], targets[i], criterion)
+        for i in range(len(data))
+    ]
     sample_grads = zip(*sample_grads)
     sample_grads = [torch.stack(shards) for shards in sample_grads]
     return sample_grads
@@ -205,7 +287,7 @@ def naive_backpropagate_grads(model, data, targets, criterion, aggregator: Aggre
 def grad_batched(losses: Tensor, model: nn.Module) -> list[Tensor]:
     """Returns the losses gradients w.r.t the model parameters in batches.
         
-    Args:
+    Parameters:
         losses (Tensor): the losses computed on a batch.
             Set `reduce='none'` to the loss parameters to compute this quantity.
         model (Module): the neural network.
@@ -244,7 +326,7 @@ def grad_batched(losses: Tensor, model: nn.Module) -> list[Tensor]:
 def backward(losses: Tensor, model: nn.Module, aggregator: Aggregator):
     """Perform backpropagation.
 
-    Args:
+    Parameters:
         losses (Tensor): the losses computed on a batch.
             Set `reduce='none'` to the loss parameters to compute this quantity.
         model (Module): the neural network.
