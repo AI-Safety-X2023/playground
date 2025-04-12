@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from copy import deepcopy
 from enum import Enum
 from random import randint
@@ -145,16 +146,29 @@ class SampleInitConstant(SampleInit):
         return self.X, self.y
 
 
-class PowerofTwoSchedule:
-    """An exponential schedule that fires every step that is a power of two.
+class Schedule(ABC):
+    """An update schedule for the attack steps.
     
     In the gradient inverting attack, the poisoned label is updated according to this schedule.
+    """
+    @abstractmethod
+    def __call__(self, step: int) -> bool:
+        """Returns whether an update should be performed at this step."""
+
+class PowerofTwoSchedule(Schedule):
+    """An exponential schedule that fires every step that is a power of two.
+    
     The update frequency decreases exponentially to ensure proper convergence.
     This is necessary since label flipping is not a continuous operation.
     """
     def __call__(self, step: int) -> bool:
-        """Returns whether an update should be performed at this step."""
         return step & (step - 1) == 0
+
+
+class NeverUpdate(Schedule):
+    """Never update the label."""
+    def __call__(self, _step: int):
+        return False
 
 
 class GradientInverter:
@@ -167,6 +181,7 @@ class GradientInverter:
             sample_init: SampleInit,
             tv_coef = 0.0, # TODO: more ergonomic interface
             lr = 0.2, # TODO: find appropriate lr scheduling step
+            label_update_schedule: Schedule = PowerofTwoSchedule(),
         ):
         self.method = method
         self.estimator = estimator
@@ -174,6 +189,7 @@ class GradientInverter:
         self.tv_coef = tv_coef
         self.lr = lr
         self.sample_init = sample_init
+        self.label_update_schedule = deepcopy(label_update_schedule)
     
     def attack_objective(
             self,
@@ -246,7 +262,6 @@ class GradientInverter:
         # We optimize on the image...
         opt = Adam([x_base], lr=self.lr)
         # ...and occasionally on the label.
-        label_update_schedule = PowerofTwoSchedule()
 
         for step in range(self.steps):
             x_base.requires_grad_(True)
@@ -279,7 +294,7 @@ class GradientInverter:
             training_data.clip_to_data_range(x_base, inplace=True)
             
             # --II---
-            if label_update_schedule(step):
+            if self.label_update_schedule(step):
                 # Instead of optimal label flipping (as in https://arxiv.org/abs/2503.00140),
                 # we guess the best class based on `loss_atk` gradients w.r.t y
                 # Efficiency is key when the number of classes grows
@@ -300,7 +315,7 @@ class GradientInverter:
             y_base.grad = None
             model.zero_grad()
 
-
+        y_base = y_base.argmax()
         return x_base, y_base
 
 
