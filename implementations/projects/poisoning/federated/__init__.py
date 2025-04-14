@@ -67,10 +67,11 @@ def combine_jacobians(jacs: list[Tensor]) -> Tensor:
     
     Parameters:
         jacs (list of Tensor): a list of parameter jacobians. All of these jacobians
-            must have their first dimension length equal to the batch size.
+            must have their first dimension length equal to the batch size `B`.
     
     Returns:
-        matrix (Tensor): a combined 2D jacobian matrix.
+        matrix (Tensor): a combined 2D jacobian matrix of dimension `B x D` where
+            `B` is the batch size and `D` is the length of a single flattened gradient.
     """
     return torch.cat([jac.flatten(start_dim=1) for jac in jacs], dim=1)
 

@@ -42,3 +42,12 @@ def convert_bn_modules_to_gn(module: nn.Module, default_num_groups: int = 16) ->
         mod.add_module(name, convert_bn_modules_to_gn(child, default_num_groups))
     del module
     return mod
+
+def mem_stats(step: int, name: str):
+    """Convenience function in optimization loop to find memory leaks."""
+    import torch
+    if step % 100 != 0:
+        return
+    mem = torch.cuda.memory_allocated()
+    mem_max = torch.cuda.max_memory_allocated()
+    print(f"{step=}: {name}: used={mem / mem_max:.5}, {mem=}, {mem_max=}")

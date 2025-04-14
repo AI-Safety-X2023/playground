@@ -218,11 +218,11 @@ class GradientInverter:
         self.sample_init = sample_init
         self.label_update_schedule = deepcopy(label_update_schedule)
     
-    def attack_objective(
+    def gradient_objective(
             self,
             model_grad: Tensor,
             target_grad: Tensor,
-            x_base: Tensor = None,
+            x_p: Tensor = None,
         ) -> Tensor:
         """Returns the adversary's objective to minimize."""
         # FIXME: not reliable
@@ -251,12 +251,27 @@ class GradientInverter:
                 raise NotImplementedError
 
         if self.tv_coef:
-            assert x_base is not None
-            tv = total_variation(x_base.unsqueeze(0))
-            normalization = x_base.numel() * 4 * max_data_variation ** 2
+            assert x_p is not None
+            tv = total_variation(x_p.unsqueeze(0))
+            normalization = x_p.numel() * 4 * max_data_variation ** 2
             loss_atk += self.tv_coef * tv / normalization
         
         return loss_atk
+    
+    def poison_objective(
+            self,
+            x_p: Tensor, y_p: Tensor, target_grad: Tensor,
+            model: nn.Module, criterion: _Loss,
+            differentiable: bool = False,
+        ):
+        y_pred = model(x_p.unsqueeze(0)).squeeze()
+        loss = criterion(y_pred, y_p)
+        loss.backward(create_graph=differentiable)
+        return self.gradient_objective(
+            combined_model_gradients(model),
+            target_grad,
+            x_p,
+        )
     
     def attack(self, model: nn.Module, criterion: _Loss) -> tuple[Tensor, Tensor]:
         """Create a poisoned data point with an inverting gradient attack.
@@ -296,6 +311,7 @@ class GradientInverter:
         num_classes = len(training_data.classes)
         device = _detect_device(model)
 
+        # TODO: log gradient estimation quality
         target_grad = self.estimator.average_clean_gradient(model, criterion)
         target_grad.requires_grad_(False)
         
@@ -305,67 +321,59 @@ class GradientInverter:
         model.requires_grad_()
         model.zero_grad()
 
-        x_base, y_base = self.sample_init()
+        x_p, y_p = self.sample_init()
         
-        x_base = x_base.to(device)
-        y_base = F.one_hot(y_base, num_classes).float().to(device)
+        x_p = x_p.to(device)
+        y_p = F.one_hot(y_p, num_classes).float().to(device)
         # We optimize on the image...
-        opt = Adam([x_base], lr=self.lr)
+        opt = Adam([x_p], lr=self.lr)
         # ...and occasionally on the label.
 
         for step in range(self.steps):
-            x_base.requires_grad_(True)
-            y_base.requires_grad_(True)
+            x_p.requires_grad_(True)
+            y_p.requires_grad_(True)
 
             # --I--
-            y_pred = model(x_base.unsqueeze(0)).squeeze()
-            loss = criterion(y_pred, y_base)
-            loss.backward(create_graph=True) # Allows 2nd-order differentiation
-            
-            loss_atk = self.attack_objective(
-                combined_model_gradients(model),
-                target_grad,
-                x_base,
+            loss_atk = self.poison_objective(
+                x_p, y_p, target_grad,
+                model, criterion, differentiable=True,
             )
+            # TODO: log stats
             #print(f"Inverting gradient step {step}: loss = {loss.item()}, loss_atk = {loss_atk.item()}")
-            # Clear `loss` gradients on `x_base`
+            # Clear `loss` gradients on `x_p`
             opt.zero_grad()
 
-            # Optimize `x_base`
-            loss_atk.backward(inputs=x_base)
+            # Optimize `x_p`
+            loss_atk.backward(inputs=x_p)
             opt.step()
             opt.zero_grad()
             model.zero_grad()
 
             # Avoids autograd graph errors when modifying tensor in-place
-            x_base.requires_grad_(False)
+            x_p.requires_grad_(False)
             # Projected optimization algorithm
-            training_data.clip_to_data_range(x_base, inplace=True)
+            training_data.clip_to_data_range(x_p, inplace=True)
             
             # --II---
             if self.label_update_schedule(step):
                 # Instead of optimal label flipping (as in https://arxiv.org/abs/2503.00140),
                 # we guess the best class based on `loss_atk` gradients w.r.t y
                 # Efficiency is key when the number of classes grows
-                y_candidate = F.one_hot(y_base.grad.argmin(), num_classes).float()
-                y_pred = model(x_base.unsqueeze(0)).squeeze()
-                loss = criterion(y_pred, y_candidate)
-                loss.backward()
-                loss_atk_2 = self.attack_objective(
-                    combined_model_gradients(model),
-                    target_grad,
-                    x_base,
+                y_candidate = F.one_hot(y_p.grad.argmin(), num_classes).float()
+                loss_atk_2 = self.poison_objective(
+                    x_p, y_candidate, target_grad,
+                    model, criterion,
                 )
                 # Change the class if it improves the adversary's objective
                 if loss_atk_2 < loss_atk:
-                    y_base = y_candidate
+                    y_p = y_candidate
         
-            y_base.requires_grad_(False)
-            y_base.grad = None
+            y_p.requires_grad_(False)
+            y_p.grad = None
             model.zero_grad()
 
-        y_base = y_base.argmax()
-        return x_base, y_base
+        y_p = y_p.argmax()
+        return x_p, y_p
 
 
 def combined_model_gradients(model: nn.Module) -> Tensor:
