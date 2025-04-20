@@ -6,7 +6,6 @@ import dataclasses
 from dataclasses import dataclass
 import numpy as np
 from torch import nn, Tensor
-from torch.nn import functional as F
 from torch.nn.modules.loss import _Loss, CrossEntropyLoss
 from torch.optim import Optimizer, SGD, Adam
 from torch.utils.data import Dataset, DataLoader, TensorDataset
@@ -25,7 +24,7 @@ from image_classification.nn import (
 )
 from image_classification.gradient_attack import GradientInverter, LearningSettings
 from image_classification.unlearning import (
-    gradient_descent, gradient_ascent, neg_grad_plus, unlearning_last_layers, scrub,
+    gradient_descent, gradient_ascent, neg_grad_plus_loop, unlearning_last_layers, scrub,
     NoisySGD,
 )
 
@@ -44,6 +43,7 @@ class Hyperparams:
     lr: float = 1e-3
     weight_decay: float = 5e-4
     max_lr: float = 0.1 # for learning rate scheduling
+    batch_size: int = BATCH_SIZE
     epochs: int = 6
     num_classes: int = NUM_CLASSES
     top_k: int = {10: 1, 100: 5}[NUM_CLASSES]
@@ -73,9 +73,9 @@ class Pipeline:
     forget_set, logs = pipeline.train_loop_with_poisons(model, inverter)
 
     unlearning_method = Unlearning.NEG_GRAD_PLUS
-    forget_loader = Dataloader(forget_set, batch_size)
+    forget_loader = DataLoader(forget_set, batch_size)
     pipeline.unlearn(model, forget_loader, unlearning_method)
-    ```aux_lo
+    ```
     """
     def __init__(
             self,
@@ -197,6 +197,16 @@ class Pipeline:
         model: nn.Module,
         inverter: GradientInverter,
     ) -> TensorDataset:
+        """Train the model with both clean data and poisons crafted by the inverting
+        gradient attack.
+
+        Args:
+            model (Module): an untrained neural network.
+            inverter (GradientInverter): the attacking method.
+
+        Returns:
+            poisons (TensorDataset): the crafted, deduplicated poisons.
+        """
         train_loader, val_loader = self.make_dataloaders()
         metric = self.make_metrics()
         poison_set = UpdatableDataset()
@@ -221,16 +231,27 @@ class Pipeline:
 
     def unlearn(
         self,
-        net: nn.Module,
+        model: nn.Module,
         forget_loader: DataLoader,
         method: Unlearning,
-    ):
+    ) -> tuple[nn.Module, Logs]:
+        """Perform unlearning.
+
+        Args:
+            model (Module): the poisoned model to undergo unlearning.
+            forget_loader (DataLoader): the poisoned data to unlearn.
+            method (Unlearning): the unlearning algorithm.
+
+        Returns:
+            unlearner_logs (tuple[nn.Module, Logs]): a new model after unlearning
+                and training/unlearning logs.
+        """
         lr = self.hparams.lr
         criterion = self.settings.criterion
         # NOTE: train loader is always clean
         train_loader, val_loader = self.make_dataloaders()
 
-        unlearner = deepcopy(net)
+        unlearner = deepcopy(model)
         
         uhparams: dict = self.unlearning_hparams[method]
         epochs = uhparams['epochs']
@@ -239,7 +260,7 @@ class Pipeline:
         match method:
             case Unlearning.GRADIENT_DESCENT:
                 opt = self.make_optimizer(unlearner, opt_cls=SGD, lr=lr)
-                gradient_descent(
+                logs = gradient_descent(
                     unlearner, train_loader, val_loader,
                     criterion, opt, epochs=epochs, keep_pbars=False
                 )
@@ -248,34 +269,63 @@ class Pipeline:
                     unlearner, opt_cls=NoisySGD,
                     lr=lr, noise_scale=uhparams['noise_scale'],
                 )
-                gradient_descent(
+                logs = gradient_descent(
                     unlearner, train_loader, val_loader,
                     criterion, opt, epochs=epochs, keep_pbars=False
                 )
             case Unlearning.GRADIENT_ASCENT:
                 opt = self.make_optimizer(unlearner, opt_cls=SGD, lr=lr)
-                gradient_ascent(
+                logs = gradient_ascent(
                     unlearner, train_loader, val_loader,
                     criterion, opt, epochs=epochs, keep_pbars=False
                 )
             case Unlearning.NEG_GRAD_PLUS:
                 opt = self.make_optimizer(unlearner, opt_cls=SGD, lr=lr)
-                for epoch in trange(epochs, desc='NegGrad+ epochs', unit='epoch', leave=True):
-                    neg_grad_plus(
-                        unlearner, train_loader, forget_loader,
-                        criterion, opt, keep_pbars=False,
-                    )
+                logs = neg_grad_plus_loop(
+                    unlearner, train_loader, forget_loader,
+                    criterion, opt, keep_pbars=False,
+                )
             case Unlearning.EUK:
                 opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
                 with unlearning_last_layers(unlearner, k, 'euk'):
-                    train_loop(unlearner, train_loader, criterion, opt, epochs=epochs)
+                    logs = train_loop(unlearner, train_loader, criterion, opt, epochs=epochs)
             case Unlearning.SCRUB:
                 opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
-                scrub(
-                    net, unlearner, train_loader, forget_loader, criterion, opt,
+                logs = scrub(
+                    model, unlearner, train_loader, forget_loader, criterion, opt,
                     max_steps=uhparams['max_steps'], steps=uhparams['steps'],
                     alpha=uhparams['alpha'], beta=uhparams['beta'], gamma=uhparams['gamma'],
                     keep_pbars=False,
                 )
         
-        return unlearner
+        return unlearner, logs
+
+    def poison_and_unlearn(
+        self,
+        model: nn.Module,
+        inverter: GradientInverter,
+        unlearning_method: Unlearning,
+    ) -> tuple[nn.Module, PipelineResults]:
+        """Run the full gradient inversion poisoning attack and unlearning pipeline.
+
+        Args:
+            model (Module): the untrained model.
+            inverter (GradientInverter): the gradient inversion poisoning attack settings.
+            unlearning_method (Unlearning): the unlearning algorithm.
+
+        Returns:
+            model_results (tuple[Module, PipelineResults]): the unlearned model and
+                the pipeline results.        
+        """
+        forget_set, train_logs = self.train_loop_with_poisons(model, inverter)
+        forget_loader = DataLoader(forget_set, self.hparams.batch_size)
+        unlearner, unlearn_logs = self.unlearn(model, forget_loader, unlearning_method)
+        return unlearner, PipelineResults(forget_set, train_logs, unlearn_logs)
+
+
+class PipelineResults:
+    """The results of the poisoning attack and machine unlearning."""
+    def __init__(self, poison_set: Dataset, train_logs: Logs, unlearn_logs: Logs):
+        self.poison_set = poison_set
+        self.train_logs = train_logs
+        self.unlearn_logs = unlearn_logs

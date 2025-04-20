@@ -80,11 +80,15 @@ class Logs:
         val_metrics (list of dict of optional Metric):
             a list of computed metrics indexed by the validation epoch.
             `val_metrics[epoch]` is empty when no validation was performed at `epoch`.
+        unlearn_metrics (list of dict of optional Metric):
+            a list of computed metrics indexed by the unlearning epoch.
+            `unlearn_metrics[epoch]` is empty when no unlearning was performed at `epoch`.
     """
     def __init__(self):
         self.train_metrics: list[dict[str, Metric]] = []
         self.val_metrics: list[dict[str, Metric]] = []
-
+        self.unlearn_metrics:  list[dict[str, Metric]] = []
+    
     def update_train_epoch(self, train_logger: MetricLogger):
         """Update the training metrics of an epoch.
 
@@ -106,6 +110,19 @@ class Logs:
         else:
             metrics = val_logger.metrics
         self.val_metrics.append(metrics)
+    
+    def update_unlearn_epoch(self, unlearn_logger: MetricLogger = None):
+        """Update the unlearn metrics of an epoch.
+
+        Parameters:
+            unlearn_logger (MetricLogger, optional): the logger returned by
+                the validation epoch. `None` if no validation performed at this step.
+        """
+        if unlearn_logger is None:
+            metrics = {}
+        else:
+            metrics = unlearn_logger.metrics
+        self.unlearn_metrics.append(metrics)
 
 
 def _detect_device(model: nn.Module) -> torch.device:
@@ -268,7 +285,7 @@ def distillation_epoch(
         optimizer: Optimizer,
         criterion,
         keep_pbars=True,
-    ):
+    ) -> MetricLogger:
     """
     Perform a single epoch of knowledge distillation in a student-teacher method.
 
@@ -303,6 +320,7 @@ def distillation_epoch(
         logger.compute_metrics(X, target, logits_student, loss)
 
     logger.finish()
+    return logger
 
 
 

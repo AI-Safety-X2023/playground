@@ -10,7 +10,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim import Optimizer, SGD
 
 from .utils import tqdm, trange
-from .nn import MetricLogger, distillation_epoch, train_val_loop, _detect_device
+from .nn import MetricLogger, Logs, distillation_epoch, train_val_loop, _detect_device
 
 
 def model_layers(model: nn.Module, first: int, last: int):
@@ -42,13 +42,13 @@ def unlearning_last_layers(model: nn.Module, k: int, mode='cfk'):
     """
     Perform machine unlearning by retraining the k last layers.
 
-    # Arguments
-    - `k` : the number of layers to retrain
-    - `mode` :
-        - `'euk'` : use the EUk algorithm, i.e. retrain the last layers form scratch
-        - `'cfk'` : use the CFk algorithm, i.e. don't retrain from scratch (default)
+    Arguments:
+        k (int): the number of layers to retrain
+        mode (str): the unlearning variant
+            - `'euk'` : use the EUk algorithm, i.e. retrain the last layers form scratch
+            - `'cfk'` : use the CFk algorithm, i.e. don't retrain from scratch (default)
     
-    # Example
+    Example:
 
     ```python
     with unlearning_last_layers(model, 3, mode='euk'):
@@ -88,7 +88,7 @@ def gradient_descent(
         optimizer: SGD,
         epochs: int,
         **kwargs,
-    ):
+    ) -> Logs:
     """
     Gradient descent unlearning method.
 
@@ -111,7 +111,7 @@ def gradient_ascent(
         optimizer: SGD,
         epochs: int,
         **kwargs,
-    ):
+    ) -> Logs:
     """
     Perform gradient ascent on the forget set.
 
@@ -173,16 +173,17 @@ def neg_grad_plus(
         optimizer: Optimizer,
         beta=0.999,
         keep_pbars=True,
-    ):
-    """
-    NegGrad+ algorithm from Kurmanji et al. A finetuning-based unlearning algorithm
-    that balances gradient ascent on the forget set and gradient descent on the retain set.
+    ) -> MetricLogger:
+    """NegGrad+ algorithm from Kurmanji et al.
+    
+    A finetuning-based unlearning algorithm that balances gradient ascent
+    on the forget set and gradient descent on the retain set.
 
     This function performs one training epoch.
 
-    # Parameters
-    `beta` : the loss function coefficient on the retain set.
-             The coefficient on the forget set is `1 - beta`.
+    Parameters:
+        beta (float): the loss function coefficient on the retain set.
+            The coefficient on the forget set is `1 - beta`.
 
     Reference paper: https://arxiv.org/abs/2302.09880
     """
@@ -217,7 +218,29 @@ def neg_grad_plus(
         logger.compute_metrics(X_f, y_f, None, loss.item())
     
     logger.finish()
+    return logger
 
+def neg_grad_plus_loop(
+        model: nn.Module,
+        retain: DataLoader,
+        forget: DataLoader,
+        loss_fn: _Loss,
+        optimizer: Optimizer,
+        epochs: int,
+        beta=0.999,
+        keep_pbars=True,
+    ) -> Logs:
+    logs = Logs()
+    for epoch in trange(epochs, desc='NegGrad+ epochs', unit='epoch', leave=keep_pbars):
+        logger = neg_grad_plus(
+            model,
+            retain, forget,
+            loss_fn, optimizer,
+            beta=beta,
+            keep_pbars=keep_pbars,
+        )
+        logs.update_train_epoch(logger)
+    return logs
 
 def oracle_unlearning(
         model: nn.Module,
@@ -227,7 +250,7 @@ def oracle_unlearning(
         optimizer: Optimizer,
         beta=0.9,
         keep_pbars=True,
-    ):
+    ) -> MetricLogger:
     """
     A variation of NegGrad+ where the retain set is replaced by the forget set
     before poisoning.
@@ -258,6 +281,7 @@ def oracle_unlearning(
         logger.compute_metrics(X_f, y_f, None, loss.item())
     
     logger.finish()
+    return logger
 
 
 def scrub_unlearning_epoch(
@@ -267,7 +291,7 @@ def scrub_unlearning_epoch(
         optimizer: Optimizer,
         beta=0.01,
         keep_pbars=True,
-    ):
+    ) -> MetricLogger:
     """
     This corresponds to the Algorithm 2: `DO-MAX-EPOCH` in the SCRUB paper.
     """
@@ -295,7 +319,7 @@ def scrub_learning_epoch(
         alpha=0.1,
         gamma=0.9,
         keep_pbars=True,
-    ):
+    ) -> MetricLogger:
     """
     This corresponds to the Algorithm 3: `DO-MIN-EPOCH` in the SCRUB paper.
     """
@@ -328,14 +352,16 @@ def scrub(
         beta=0.01,
         gamma=0.9,
         keep_pbars=True,
-    ):
-    """
-    SCRUB algorithm from Kurmanji et al. A state-of-the-art unlearning algorithm
-    that selectively trains a student model on a teacher model.
+    ) -> Logs:
+    """SCRUB algorithm from Kurmanji et al.
+    
+    A state-of-the-art unlearning algorithm that selectively trains
+    a student model on a teacher model.
 
-    # Parameters
-    - `alpha` : KL divergence coefficient on the retain set
-    - `gamma` : loss function coefficient on the retain set
+    Parameters:
+        alpha (float) : KL divergence coefficient on the retain set
+        beta (float) : KL divergence coefficient on the forget set
+        gamma (float) : loss function coefficient on the retain set
 
     Reference paper: https://arxiv.org/abs/2302.09880
 
@@ -344,21 +370,25 @@ def scrub(
     teacher.eval()
     student.train()
 
+    logs = Logs()
     for epoch in trange(steps, desc='SCRUB epoch', leave=keep_pbars):
         if epoch < max_steps:
-            scrub_unlearning_epoch(
+            logger = scrub_unlearning_epoch(
                 teacher, student,
                 forget,
                 optimizer,
                 beta,
                 keep_pbars,
             )
-        scrub_learning_epoch(
+            logs.update_train_epoch(logger)
+        logger = scrub_learning_epoch(
             teacher, student,
             retain,
             loss_fn, optimizer,
             alpha, gamma,
             keep_pbars,
         )
-        
+        logs.update_train_epoch(logger)
+    
+    return logs
 
