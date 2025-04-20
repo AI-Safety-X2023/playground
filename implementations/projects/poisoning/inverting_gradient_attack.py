@@ -21,7 +21,7 @@ from image_classification.datasets import UpdatableDataset
 from image_classification.nn import (
     MetricLogger, Logs, train_loop, test_epoch
 )
-from image_classification.gradient_attack import GradientInverter
+from image_classification.gradient_attack import GradientInverter, LearningSettings
 from image_classification.unlearning import (
     gradient_descent, gradient_ascent, neg_grad_plus, unlearning_last_layers, scrub,
     NoisySGD,
@@ -57,17 +57,30 @@ class Unlearning(Enum):
     SCRUB = 6
 
 
-class Trainer:
+class Pipeline:
+    """An inverting gradient attack and machine unlearning pipeline.
+
+    Example:
+    ```python
+    estimator = ShadowGradientEstimator(aux_loader)
+    sample_init = SampleInitRandomNoise()
+    inverter = GradientInverter(method, estimator, steps, sample_init)
+    pipeline = Pipeline(settings, train_loader, val_loader, hparams)
+    forget_set, logs = pipeline.train_loop_with_poisons(model, inverter)
+
+    unlearning_method = Unlearning.NEG_GRAD_PLUS
+    forget_loader = Dataloader(forget_set, batch_size)
+    pipeline.unlearn(model, forget_loader, unlearning_method)
+    ```aux_lo
+    """
     def __init__(
             self,
-            criterion: _Loss,
-            aggregator: Aggregator,
+            settings: LearningSettings,
             train_loader: DataLoader,
             val_loader: DataLoader = None,
             **hparams,
         ):
-        self.criterion = criterion
-        self.aggregator = aggregator
+        self.settings = settings
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.hparams = deepcopy(DEFAULT_HPARAMS)
@@ -120,13 +133,15 @@ class Trainer:
         self,
         model: nn.Module,
         inverter: GradientInverter,
-        alpha_poison=0.05,
         keep_pbars=True,
     ) -> tuple[UpdatableDataset, Logs]:
         train_loader, _ = self.make_dataloaders()
-        criterion = deepcopy(self.criterion)
+        criterion = deepcopy(self.settings.criterion)
+        aggregator = deepcopy(self.settings.aggregator)
         optimizer = self.make_optimizer(model)
         metric = self.make_metrics()
+
+        poison_factor = self.settings.poison_factor
 
         model.train()
         logger = MetricLogger(
@@ -140,28 +155,36 @@ class Trainer:
             X, y = X.to(BEST_DEVICE), y.to(BEST_DEVICE)
             logits = model(X)
 
-            # TODO: use LearningSettings
-
-            if isinstance(self.aggregator, Mean):
+            if isinstance(aggregator, Mean):
                 # TODO: handle losses that don't reduce
-                loss = (1 - alpha_poison) * criterion(logits, y)
+                loss = (1 - poison_factor) * criterion(logits, y)
                 # TODO: backpropagate on each loss element (and model.zero_grad() every time)
                 loss.backward()
 
                 # --- poisoning attack
                 X_p, y_p = inverter.attack(model, criterion)
-                poison_set.append(X_p, y_p)
 
                 logits_p = model(X_p.unsqueeze(0))
-                loss_p = alpha_poison * criterion(logits_p, y_p.unsqueeze(0))
+                loss_p = poison_factor * criterion(logits_p, y_p.unsqueeze(0))
                 # This adds to `loss` model gradients due to gradient accumulation
                 loss_p.backward()
                 # ---
                 optimizer.step()
                 optimizer.zero_grad()
-            else:
-                raise NotImplementedError
+            elif isinstance(aggregator, Krum):
+                fed.per_sample_grads(model, X, y, criterion, store_in_params=True)
 
+                X_p, y_p = inverter.attack(model, criterion, self.settings)
+                # This "accumulates" gradients by appending rows in the jacobian matrices
+                fed.per_sample_grads(model, X_p, y_p, criterion, store_in_params=True)
+                fed.aggregate_and_store_grads(model, aggregator)
+            else:
+                raise NotImplementedError(f"Unknown aggregator: {aggregator.__class__}")
+            
+            poison_set.append(X_p, y_p)
+            optimizer.step()
+            optimizer.zero_grad()
+            
             # FIXME: does not include X_p, y_p, logits_p, loss_p
             # TODO: log loss on poisons
             # TODO: display some poisons
@@ -175,7 +198,6 @@ class Trainer:
         self,
         model: nn.Module,
         inverter: GradientInverter,
-        alpha_poison=0.05,
     ) -> TensorDataset:
         train_loader, val_loader = self.make_dataloaders()
         metric = self.make_metrics()
@@ -187,13 +209,12 @@ class Trainer:
             poison_set_epoch, logger = self.train_epoch_with_poisons(
                 model,
                 inverter,
-                alpha_poison=alpha_poison,
             )
             poison_set.extend(poison_set_epoch)
             logs.update_train_epoch(logger)
 
             logger = test_epoch(
-                model, val_loader, self.criterion,
+                model, val_loader, self.settings.criterion,
                 keep_pbars=True, metric=metric,
             )
             logs.update_val_epoch(logger)
@@ -207,7 +228,7 @@ class Trainer:
         method: Unlearning,
     ):
         lr = self.hparams['lr']
-        criterion = self.criterion
+        criterion = self.settings.criterion
         # NOTE: train loader is always clean
         train_loader, val_loader = self.make_dataloaders()
 
@@ -225,7 +246,10 @@ class Trainer:
                     criterion, opt, epochs=epochs, keep_pbars=False
                 )
             case Unlearning.NOISY_GRADIENT_DESCENT:
-                opt = self.make_optimizer(unlearner, opt_cls=NoisySGD, lr=lr)
+                opt = self.make_optimizer(
+                    unlearner, opt_cls=NoisySGD,
+                    lr=lr, noise_scale=hparams['noise_scale'],
+                )
                 gradient_descent(
                     unlearner, train_loader, val_loader,
                     criterion, opt, epochs=epochs, keep_pbars=False
@@ -241,7 +265,7 @@ class Trainer:
                 for epoch in trange(epochs, desc='NegGrad+ epochs', unit='epoch', leave=True):
                     neg_grad_plus(
                         unlearner, train_loader, forget_loader,
-                        criterion, opt, keep_pbars=False
+                        criterion, opt, keep_pbars=False,
                     )
             case Unlearning.EUK:
                 opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)

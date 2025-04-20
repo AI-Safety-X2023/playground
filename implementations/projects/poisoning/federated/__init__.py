@@ -131,6 +131,7 @@ def per_sample_grads(
         y: Tensor,
         criterion: _Loss,
         store_in_params: bool = False,
+        append: bool = True,
     ) -> dict[str, Tensor]:
     """Compute per-sample gradients (jacobians).
 
@@ -141,6 +142,8 @@ def per_sample_grads(
         criterion (loss): the loss function.
         store_in_params (bool, defaults to False): whether to store
             the per-sample gradients in the parameters `.grad` field.
+        append (bool, defaults to False): whether to append additional rows
+            to existing jacobian matrices stored in the `.grad` fields.
 
     Returns:
         grads (dict): a dict of the gradients indexed by the parameter names.
@@ -193,9 +196,16 @@ def per_sample_grads(
 
     if store_in_params:
         for (param, grad) in zip(model.parameters(), grads.values()):
-            # Store the jacobian matrix in the grad field
             # TODO: detach_() to save memory??
-            param.grad = grad
+            if append and (
+                    isinstance(param.grad, Tensor) and
+                    len(param.grad.shape) == len(param.shape) + 1
+                ):
+                # Append to the jacobian matrix
+                param.grad = torch.cat([param.grad, grad])
+            else:
+                # Store the jacobian matrix in the grad field
+                param.grad = grad
 
     return grads
 
@@ -220,8 +230,20 @@ def backpropagate_grads(
     **Important note on batch normalization**: see `per_sample_grads`
     for the requirement on `model`.
     """
-    grads = per_sample_grads(model, X, y, criterion)
-    agg_grads = aggregate(list(grads.values()), aggregator)
+    per_sample_grads(model, X, y, criterion)
+    aggregate_and_store_grads(model, aggregator)
+
+def aggregate_and_store_grads(model: nn.Module, aggregator: Aggregator):
+    """Aggregate the per-sample model gradients and store them. 
+
+    Assumes that the jacobians have already been store in the model with
+    `per_sample_grads(..., store_in_params=True)`.
+
+    Args:
+        model (Module): a neural network
+        aggregator (Aggregator): the gradient aggregation method.
+    """
+    agg_grads = aggregate([param.grad for param in model.parameters()], aggregator)
 
     # The parameter order is preserved by dict
     for (param, grad) in zip(model.parameters(), agg_grads):
