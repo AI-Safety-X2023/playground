@@ -11,7 +11,8 @@ from torch.nn.modules.loss import _Loss, _WeightedLoss
 from torch.optim import Optimizer, AdamW
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import Dataset, DataLoader
-from torchmetrics import Metric, Accuracy, MeanMetric
+from torchmetrics import Metric, MeanMetric, MetricTracker
+from torchmetrics.classification import MulticlassAccuracy
 
 from .accel import BEST_DEVICE
 from .datasets import class_weights
@@ -42,16 +43,20 @@ class MetricLogger:
         self.avg_loss(loss)
         metric_values = {'avg_loss': self.avg_loss.compute().item()}
         for name, metric in self.metrics.items():
+            if isinstance(metric, MetricTracker):
+                # Track the metric over each step
+                metric.increment()
+
             value = metric(logits, y)
             if isinstance(value, dict):
-                for n, v in value:
+                for n, v in value.items():
                     assert isinstance(v, Tensor)
-                    if len(v.shape) >= 1:
+                    if v.ndim >= 1:
                         v = v.mean()
-                    metric_values[n] = v
+                    metric_values[n] = v.item()
             else:
                 assert isinstance(value, Tensor)
-                if len(value.shape) >= 1:
+                if value.ndim >= 1:
                         value = value.mean()
                 metric_values[name] = value.item()
 
@@ -369,7 +374,7 @@ class Hyperparameters:
 
     optimizer_params: OptimizerParams = OptimizerParams()
 
-    metric: Metric = Accuracy(task='multiclass', num_classes=10)
+    metric: Metric = MulticlassAccuracy(num_classes=10)
 
     def make_optimizer(self, model: nn.Module) -> Optimizer:
         return self.optimizer(

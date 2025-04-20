@@ -9,7 +9,7 @@ from torch import nn, Tensor
 from torch.nn.modules.loss import _Loss, CrossEntropyLoss
 from torch.optim import Optimizer, SGD, Adam
 from torch.utils.data import Dataset, DataLoader, TensorDataset
-from torchmetrics import Metric, MetricCollection
+from torchmetrics import Metric, MetricCollection, MetricTracker
 from torchmetrics.classification import MulticlassAccuracy
 
 import federated as fed
@@ -104,10 +104,24 @@ class Pipeline:
         }
     
     def make_dataloaders(self) -> tuple[DataLoader, DataLoader]:
+        """Make the training and validation dataloaders.
+        
+        These dataloaders are guaranteed to be clean.
+        """
         # TODO: clone?
         return (self.train_loader, self.val_loader)
 
     def make_optimizer(self, model: nn.Module, opt_cls = Adam, lr: float = None) -> Optimizer:
+        """Create the optimizer with the pipeline training hyperparameters.
+
+        Args:
+            model (Module): the neural network.
+            opt_cls (Optimizer type): the optimizer class. Defaults to Adam.
+            lr (float, optional): learning rate. Defaults to None.
+
+        Returns:
+            Optimizer: the optimizer.
+        """
         if lr is None:
             lr = self.hparams.lr
         return opt_cls(
@@ -116,17 +130,22 @@ class Pipeline:
             weight_decay=self.hparams.weight_decay,
         )
 
-    def make_metrics(self) -> MetricCollection:
-        return MetricCollection({
-            # log per-class accuracy at each step
+    def make_metrics(self) -> MetricTracker:
+        """Track multiple metrics over time.
+
+        Returns:
+            tracker (MetricTracker): a wrapper that tracks metric values over multiple steps.
+        """
+        # log per-class accuracy at each step
+        return MetricTracker(MetricCollection({
+            # TODO: moving average for smoothness?
             'accuracy': MulticlassAccuracy(
                 num_classes=self.hparams.num_classes,
                 top_k=self.hparams.top_k,
                 average='none',
-                multidim_average='samplewise',
             ),
             # TODO: KLDivergence // other clean model
-        })
+        }))
 
 
     def train_epoch_with_poisons(
@@ -157,27 +176,39 @@ class Pipeline:
 
             if isinstance(aggregator, Mean):
                 # TODO: handle losses that don't reduce
-                loss = (1 - poison_factor) * criterion(logits, y)
-                # TODO: backpropagate on each loss element (and model.zero_grad() every time)
-                loss.backward()
+                loss_c = (1 - poison_factor) * criterion(logits, y)
+                loss_c.backward()
 
                 # --- poisoning attack
                 X_p, y_p = inverter.attack(model, criterion)
-
-                logits_p = model(X_p.unsqueeze(0))
-                loss_p = poison_factor * criterion(logits_p, y_p.unsqueeze(0))
+                # Unsqueeze since model and criterion expect batch
+                X_p_, y_p_ = X_p.unsqueeze(0), y_p.unsqueeze(0)
+                logits_p = model(X_p_)
+                loss_p = poison_factor * criterion(logits_p, y_p_)
                 # This adds to `loss` model gradients due to gradient accumulation
                 loss_p.backward()
                 # ---
                 optimizer.step()
                 optimizer.zero_grad()
+
+                loss = loss_c + loss_p
+            
             elif isinstance(aggregator, Krum):
                 fed.per_sample_grads(model, X, y, criterion, store_in_params=True)
 
                 X_p, y_p = inverter.attack(model, criterion, self.settings)
+                # Repeat poisons at identical for each byzantine data supplier
+                f = self.settings.num_byzantine
+                X_p_ = X_p.repeat(f, *([1] * X_p.ndim))
+                y_p_ = y_p.repeat(f, *([1] * y_p.ndim))
                 # This "accumulates" gradients by appending rows in the jacobian matrices
-                fed.per_sample_grads(model, X_p, y_p, criterion, store_in_params=True)
+                fed.per_sample_grads(
+                    model, X_p_, y_p_, criterion,
+                    store_in_params=True, append=True,
+                )
                 fed.aggregate_and_store_grads(model, aggregator)
+                loss = criterion(model(X), y) + criterion(model(X_p_), y_p_)
+            
             else:
                 raise NotImplementedError(f"Unknown aggregator: {aggregator.__class__}")
             
@@ -204,7 +235,7 @@ class Pipeline:
             logs (Logs): training logs.
         """
         train_loader, val_loader = self.make_dataloaders()
-        optimizer = self.make_optimizer()
+        optimizer = self.make_optimizer(model)
         metric = self.make_metrics()
         return train_val_loop(
             model,
@@ -309,12 +340,15 @@ class Pipeline:
                 opt = self.make_optimizer(unlearner, opt_cls=SGD, lr=lr)
                 logs = neg_grad_plus_loop(
                     unlearner, train_loader, forget_loader,
-                    criterion, opt, keep_pbars=False,
+                    criterion, opt, epochs=epochs, keep_pbars=False,
                 )
             case Unlearning.EUK:
                 opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
                 with unlearning_last_layers(unlearner, k, 'euk'):
-                    logs = train_loop(unlearner, train_loader, criterion, opt, epochs=epochs)
+                    logs = train_loop(
+                        unlearner, train_loader,
+                        criterion, opt, epochs=epochs, keep_pbars=False,
+                    )
             case Unlearning.SCRUB:
                 opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
                 logs = scrub(

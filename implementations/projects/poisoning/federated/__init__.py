@@ -199,7 +199,7 @@ def per_sample_grads(
             if append and (
                     hasattr(param, 'jac') and
                     isinstance(param.jac, Tensor) and
-                    len(param.jac.shape) == len(param.shape) + 1
+                    param.jac.ndim == param.ndim + 1
                 ):
                 # Append to the jacobian matrix
                 param.jac = torch.cat([param.jac, jac])
