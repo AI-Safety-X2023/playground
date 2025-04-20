@@ -34,7 +34,6 @@ class MetricLogger:
         self.pbar = tqdm(desc=desc, total=total, leave=keep_pbars)
         # Forces storage of description even if progress bar is disabled
         self.pbar.desc = desc or ''
-        
 
     def compute_metrics(
             self,
@@ -58,6 +57,10 @@ class MetricLogger:
 
         self.pbar.n += len(X)
         self.pbar.set_postfix(**metric_values)
+    
+    def compute_additional_metrics(self, metric_names: list[str], *args):
+        for name in metric_names:
+            self.metrics[name](*args)
 
     def finish(self):            
         if self.pbar.leave:

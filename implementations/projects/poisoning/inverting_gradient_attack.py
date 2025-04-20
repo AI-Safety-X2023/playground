@@ -1,38 +1,41 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from enum import Enum
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy import stats
-import pandas as pd
-import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
 from torch.nn.modules.loss import _Loss, CrossEntropyLoss
-from torch.optim import Optimizer, SGD, Adam, AdamW
-from torch.utils.data import Dataset, DataLoader, Subset, TensorDataset
+from torch.optim import Optimizer, SGD, Adam
+from torch.utils.data import Dataset, DataLoader, TensorDataset
 from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import MulticlassAccuracy
 
+import federated as fed
+from federated import Aggregator, Mean, Krum
+
 from image_classification.utils import trange
 from image_classification.accel import BEST_DEVICE
-from image_classification.models import ResNet18, ShuffleNetV2
-from image_classification.datasets import (
-    UpdatableDataset, cifar10_train_test, cifar100_train_test
-)
+from image_classification.datasets import UpdatableDataset
+
 from image_classification.nn import (
-    MetricLogger, Logs, train_loop, train_val_loop, test_epoch
+    MetricLogger, Logs, train_loop, test_epoch
 )
-from image_classification.gradient_attack import (
-    GradientAttack,
-    GradientEstimator, OmniscientGradientEstimator, ShadowGradientEstimator,
-    SampleInit, SampleInitRandomNoise,
-    GradientInverter,
-    Schedule, NeverUpdate
+from image_classification.gradient_attack import GradientInverter
+from image_classification.unlearning import (
+    gradient_descent, gradient_ascent, neg_grad_plus, unlearning_last_layers, scrub,
+    NoisySGD,
 )
 
 NUM_CLASSES = 10
+BATCH_SIZE = 64
+TRAINING_DATA_LEN = 40_000
+
+DEFAULT_LR_SCHED_PARAMS = dict(
+    max_lr = 0.1,
+    epochs = 6,
+    steps_per_epoch = TRAINING_DATA_LEN // BATCH_SIZE,
+)
 
 DEFAULT_HPARAMS = dict(
     lr = 1e-3,
@@ -44,19 +47,43 @@ DEFAULT_HPARAMS = dict(
     criterion = CrossEntropyLoss(),
 )
 
+class Unlearning(Enum):
+    GRADIENT_DESCENT = 0
+    GRADIENT_ASCENT = 1
+    NOISY_GRADIENT_DESCENT = 2
+    NEG_GRAD_PLUS = 3
+    CFK = 4
+    EUK = 5
+    SCRUB = 6
+
+
 class Trainer:
     def __init__(
             self,
             criterion: _Loss,
+            aggregator: Aggregator,
             train_loader: DataLoader,
             val_loader: DataLoader = None,
             **hparams,
         ):
         self.criterion = criterion
+        self.aggregator = aggregator
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.hparams = deepcopy(DEFAULT_HPARAMS)
         self.hparams.update(**hparams)
+
+        lr = self.hparams['lr']
+        epochs = self.hparams['epochs']
+        self.unlearning_hparams = {
+            Unlearning.GRADIENT_DESCENT: dict(lr=lr, epochs=1),
+            Unlearning.NOISY_GRADIENT_DESCENT: dict(lr=lr, epochs=1, noise_scale=np.sqrt(1e-7)),
+            Unlearning.GRADIENT_ASCENT: dict(lr=1e-5, epochs=1),
+            Unlearning.NEG_GRAD_PLUS: dict(lr=lr, beta=0.999, epochs=epochs),
+            Unlearning.CFK: dict(k=6, lr=lr, epochs=epochs//2),
+            Unlearning.EUK: dict(k=6, lr=lr, epochs=epochs//2),
+            Unlearning.SCRUB: dict(max_steps=1, steps=1, alpha=0.1, beta=0.01, gamma=0.9),
+        }
     
     def __getattr__(self, name: str):
         if name in self.hparams:
@@ -67,10 +94,12 @@ class Trainer:
         # TODO: clone?
         return (self.train_loader, self.val_loader)
 
-    def make_optimizer(self, model: nn.Module, opt_cls = Adam) -> Optimizer:
+    def make_optimizer(self, model: nn.Module, opt_cls = Adam, lr: float = None) -> Optimizer:
+        if lr is None:
+            lr = self.lr
         return opt_cls(
             model.parameters(),
-            lr=self.lr,
+            lr=lr,
             weight_decay=self.weight_decay,
         )
 
@@ -110,28 +139,34 @@ class Trainer:
         for X, y in train_loader:
             X, y = X.to(BEST_DEVICE), y.to(BEST_DEVICE)
             logits = model(X)
-            # TODO: handle losses that don't reduce
-            loss = (1 - alpha_poison) * criterion(logits, y)
-            # TODO: backpropagate on each loss element (and model.zero_grad() every time)
-            loss.backward()
 
-            # --- poisoning attack
-            X_p, y_p = inverter.attack(model, criterion)
-            poison_set.append(X_p, y_p)
+            # TODO: use LearningSettings
 
-            logits_p = model(X_p.unsqueeze(0))
-            loss_p = alpha_poison * criterion(logits_p, y_p.unsqueeze(0))
-            # This adds to `loss` model gradients due to gradient accumulation
-            loss_p.backward()
-            # ---
+            if isinstance(self.aggregator, Mean):
+                # TODO: handle losses that don't reduce
+                loss = (1 - alpha_poison) * criterion(logits, y)
+                # TODO: backpropagate on each loss element (and model.zero_grad() every time)
+                loss.backward()
 
-            optimizer.step()
-            optimizer.zero_grad()
+                # --- poisoning attack
+                X_p, y_p = inverter.attack(model, criterion)
+                poison_set.append(X_p, y_p)
+
+                logits_p = model(X_p.unsqueeze(0))
+                loss_p = alpha_poison * criterion(logits_p, y_p.unsqueeze(0))
+                # This adds to `loss` model gradients due to gradient accumulation
+                loss_p.backward()
+                # ---
+                optimizer.step()
+                optimizer.zero_grad()
+            else:
+                raise NotImplementedError
 
             # FIXME: does not include X_p, y_p, logits_p, loss_p
             # TODO: log loss on poisons
             # TODO: display some poisons
             logger.compute_metrics(X, y, logits, loss.item())
+            #logger.compute_additional_metrics('avg_poison_loss', loss_p)
         
         logger.finish()
         return poison_set, logger
@@ -164,3 +199,61 @@ class Trainer:
             logs.update_val_epoch(logger)
         
         return poison_set.to_tensor_dataset(), logs
+
+    def unlearn(
+        self,
+        net: nn.Module,
+        forget_loader: DataLoader,
+        method: Unlearning,
+    ):
+        lr = self.hparams['lr']
+        criterion = self.criterion
+        # NOTE: train loader is always clean
+        train_loader, val_loader = self.make_dataloaders()
+
+        unlearner = deepcopy(net)
+        
+        hparams: dict = self.unlearning_hparams[method]
+        epochs = hparams['epochs']
+        k = hparams.get('k')
+
+        match method:
+            case Unlearning.GRADIENT_DESCENT:
+                opt = self.make_optimizer(unlearner, opt_cls=SGD, lr=lr)
+                gradient_descent(
+                    unlearner, train_loader, val_loader,
+                    criterion, opt, epochs=epochs, keep_pbars=False
+                )
+            case Unlearning.NOISY_GRADIENT_DESCENT:
+                opt = self.make_optimizer(unlearner, opt_cls=NoisySGD, lr=lr)
+                gradient_descent(
+                    unlearner, train_loader, val_loader,
+                    criterion, opt, epochs=epochs, keep_pbars=False
+                )
+            case Unlearning.GRADIENT_ASCENT:
+                opt = self.make_optimizer(unlearner, opt_cls=SGD, lr=lr)
+                gradient_ascent(
+                    unlearner, train_loader, val_loader,
+                    criterion, opt, epochs=epochs, keep_pbars=False
+                )
+            case Unlearning.NEG_GRAD_PLUS:
+                opt = self.make_optimizer(unlearner, opt_cls=SGD, lr=lr)
+                for epoch in trange(epochs, desc='NegGrad+ epochs', unit='epoch', leave=True):
+                    neg_grad_plus(
+                        unlearner, train_loader, forget_loader,
+                        criterion, opt, keep_pbars=False
+                    )
+            case Unlearning.EUK:
+                opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
+                with unlearning_last_layers(unlearner, k, 'euk'):
+                    train_loop(unlearner, train_loader, criterion, opt, epochs=epochs)
+            case Unlearning.SCRUB:
+                opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
+                scrub(
+                    net, unlearner, train_loader, forget_loader, criterion, opt,
+                    max_steps=hparams['max_steps'], steps=hparams['steps'],
+                    alpha=hparams['alpha'], beta=hparams['beta'], gamma=hparams['gamma'],
+                    keep_pbars=False,
+                )
+        
+        return unlearner
