@@ -22,7 +22,7 @@ from image_classification.datasets import (
     UpdatableDataset, cifar10_train_test, cifar100_train_test
 )
 from image_classification.nn import (
-    MetricLogger, train_loop, train_val_loop, test_epoch
+    MetricLogger, Logs, train_loop, train_val_loop, test_epoch
 )
 from image_classification.gradient_attack import (
     GradientAttack,
@@ -93,7 +93,7 @@ class Trainer:
         inverter: GradientInverter,
         alpha_poison=0.05,
         keep_pbars=True,
-    ) -> tuple[UpdatableDataset, MetricLogger]:
+    ) -> tuple[UpdatableDataset, Logs]:
         train_loader, _ = self.make_dataloaders()
         criterion = deepcopy(self.criterion)
         optimizer = self.make_optimizer(model)
@@ -145,13 +145,22 @@ class Trainer:
         train_loader, val_loader = self.make_dataloaders()
         metric = self.make_metrics()
         poison_set = UpdatableDataset()
+
+        logs = Logs()
+
         for epoch in trange(self.epochs, desc='Train epochs', unit='epoch', leave=True):
-            poison_set_epoch, _ = self.train_epoch_with_poisons(
+            poison_set_epoch, logger = self.train_epoch_with_poisons(
                 model,
                 inverter,
                 alpha_poison=alpha_poison,
             )
             poison_set.extend(poison_set_epoch)
-            # FIXME: make test_epoch accept many metrics or MetricGroup
-            test_epoch(model, val_loader, self.criterion, keep_pbars=True, metric=metric)
-        return poison_set.to_tensor_dataset()
+            logs.update_train_epoch(logger)
+
+            logger = test_epoch(
+                model, val_loader, self.criterion,
+                keep_pbars=True, metric=metric,
+            )
+            logs.update_val_epoch(logger)
+        
+        return poison_set.to_tensor_dataset(), logs

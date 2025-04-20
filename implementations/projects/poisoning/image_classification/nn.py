@@ -68,6 +68,43 @@ class MetricLogger:
                 print(f'{self.pbar.desc}\t-', self.pbar.postfix)
         self.pbar.close()
 
+class Logs:
+    """An object that tracks training and validation metrics over epochs.
+    
+    Parameters:
+        train_metrics (list of dict of Metric):
+            a list of computed metrics indexed by the training epoch.
+        val_metrics (list of dict of optional Metric):
+            a list of computed metrics indexed by the validation epoch.
+            `val_metrics[epoch]` is empty when no validation was performed at `epoch`.
+    """
+    def __init__(self):
+        self.train_metrics: list[dict[str, Metric]] = []
+        self.val_metrics: list[dict[str, Metric]] = []
+
+    def update_train_epoch(self, train_logger: MetricLogger):
+        """Update the training metrics of an epoch.
+
+        Parameters:
+            train_logger (MetricLogger, optional): the logger returned by
+                the training epoch.
+        """
+        self.train_metrics.append(train_logger.metrics)
+    
+    def update_val_epoch(self, val_logger: MetricLogger = None):
+        """Update the validation metrics of an epoch.
+
+        Parameters:
+            val_logger (MetricLogger, optional): the logger returned by
+                the validation epoch. `None` if no validation performed at this step.
+        """
+        if val_logger is None:
+            metrics = {}
+        else:
+            metrics = val_logger.metrics
+        self.val_metrics.append(metrics)
+
+
 def _detect_device(model: nn.Module) -> torch.device:
     return next(model.parameters()).device
 
@@ -144,25 +181,35 @@ def train_loop(
         lr_scheduler: LRScheduler = None,
         keep_pbars=True,
         metric: Metric = None,
-    ):
+    ) -> Logs:
+    """Run the training loop on the model without testing.
+    
+    Parameters:
+        keep_pbars (bool, optional): whether to keep progress bars. Defaults to `True`.
+        metric (torchmetrics.Metric, optional): a metric (or a metric collection) that takes
+            true labels and logits as arguments.
+    
+    Returns:
+        logs (Logs): the complete history of tracked metrics.
     """
-    Run the training loop on the model without testing.
-    """
+    logs = Logs()
     for epoch in trange(epochs, desc='Train epochs', unit='epoch', leave=keep_pbars):
-        train_epoch(
+        logger = train_epoch(
             model,
             train_dataloader,
             loss_fn, optimizer,
             keep_pbars=keep_pbars,
             metric=metric,
         )
+        logs.update_train_epoch(logger)
         if lr_scheduler is not None:
             lr_scheduler.step()
+    return logs
 
 def train_val_loop(
         model: nn.Module,
         train_dataloader: DataLoader,
-        val_dataloader: DataLoader,
+        val_dataloader: DataLoader | None,
         loss_fn: _Loss,
         optimizer: Optimizer,
         epochs: int,
@@ -172,32 +219,43 @@ def train_val_loop(
         metric: Metric = None,
         validate_every: int = 2,
         early_stopping = True,
-    ):
-    """
-    Run the training loop on the model with periodic validation.
+    ) -> Logs:
+    """Run the training loop on the model with periodic validation.
 
     If `val_dataloader` is `None`, no validation is performed.
 
     If `early_stopping` is True, the training loop exits when validation loss starts decreasing.
+    
+    Returns:
+        logs (Logs): the training and validation logged metrics at each epoch.
     """
+    logs = Logs()
     val_loss = float('inf')
     for epoch in trange(epochs, desc='Train epochs', unit='epoch', leave=keep_pbars):
-        train_epoch(
+        logger = train_epoch(
             model, train_dataloader, loss_fn, optimizer,
             keep_pbars=keep_pbars, metric=metric,
         )
+        logs.update_train_epoch(logger)
+
         if lr_scheduler is not None:
             lr_scheduler.step()
+        
         if val_dataloader is not None and epoch % validate_every == 0:
             logger = test_epoch(
                 model, val_dataloader, loss_fn,
                 keep_pbars=keep_pbars, metric=metric,
             )
+            logs.update_val_epoch(logger)
             next_val_loss = logger.avg_loss.compute()
             if early_stopping and next_val_loss > val_loss:
                 print(f"Epoch {epoch}: validation loss stopped improving, exiting train loop.")
                 break
             val_loss = next_val_loss
+        else:
+            logs.update_val_epoch()
+    
+    return logs
 
 
 def distillation_epoch(
