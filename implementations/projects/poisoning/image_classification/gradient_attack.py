@@ -352,12 +352,13 @@ class GradientInverter:
         # TODO: Algorithm 1 in
         # https://www.semanticscholar.org/paper/be10a3afb028e971f38fa80347e4bd826724b86a
         z = z_init
-
-        ...
-        while ...:
+        z_succ = float('inf')
+        step = z_init / 2
+        while abs(z_succ - z) > threshold:
 
             # Update the poisoned gradients in the Jacobian matrix
-            jac_matrix[clean_batch_size:] = ...
+            poisoned_grads = (avg_grad - z * std_grad).unsqueeze(0).expand(num_harmful, -1) #pour etre en [1,D] puis [num_harmful,D]
+            jac_matrix[clean_batch_size:] = poisoned_grads
 
             # Compute the number of gradients selected by the aggregator
             if isinstance(aggregator, fed.Krum):
@@ -372,10 +373,13 @@ class GradientInverter:
             else:
                 raise RuntimeError(f"Unknown aggregator: {aggregator.__class__}")
             
-            # TODO
-            ...
-        
-        return z
+            if num_selected >= 1 :
+                z_succ = z
+                z = z + step / 2
+            else:
+                z = z - step / 2
+            step = step / 2
+        return z_succ
 
     def lie_attack(self, model: nn.Module, settings: LearningSettings) -> Tensor:
         """Find the target gradient for the Little Is Enough attack.
