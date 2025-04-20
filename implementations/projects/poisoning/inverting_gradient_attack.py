@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from enum import Enum
+from enum import IntEnum
 import dataclasses
 from dataclasses import dataclass
 import numpy as np
@@ -20,7 +20,7 @@ from image_classification.accel import BEST_DEVICE
 from image_classification.datasets import UpdatableDataset
 
 from image_classification.nn import (
-    MetricLogger, Logs, train_loop, test_epoch
+    MetricLogger, Logs, train_loop, test_epoch, train_val_loop
 )
 from image_classification.gradient_attack import GradientInverter, LearningSettings
 from image_classification.unlearning import (
@@ -29,7 +29,7 @@ from image_classification.unlearning import (
 )
 
 NUM_CLASSES = 10
-BATCH_SIZE = 64
+BATCH_SIZE = 100
 TRAINING_DATA_LEN = 40_000
 
 @dataclass
@@ -50,7 +50,7 @@ class Hyperparams:
     criterion: _Loss = dataclasses.field(default_factory=CrossEntropyLoss)
 
 
-class Unlearning(Enum):
+class Unlearning(IntEnum):
     GRADIENT_DESCENT = 0
     GRADIENT_ASCENT = 1
     NOISY_GRADIENT_DESCENT = 2
@@ -84,6 +84,8 @@ class Pipeline:
             val_loader: DataLoader = None,
             hparams: Hyperparams = Hyperparams(),
         ):
+        assert train_loader.batch_size == hparams.batch_size
+
         self.settings = settings
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -100,14 +102,14 @@ class Pipeline:
             Unlearning.EUK: dict(k=6, lr=lr, epochs=epochs//2),
             Unlearning.SCRUB: dict(max_steps=1, steps=1, alpha=0.1, beta=0.01, gamma=0.9),
         }
-        
+    
     def make_dataloaders(self) -> tuple[DataLoader, DataLoader]:
         # TODO: clone?
         return (self.train_loader, self.val_loader)
 
     def make_optimizer(self, model: nn.Module, opt_cls = Adam, lr: float = None) -> Optimizer:
         if lr is None:
-            lr = self.lr
+            lr = self.hparams.lr
         return opt_cls(
             model.parameters(),
             lr=lr,
@@ -192,20 +194,43 @@ class Pipeline:
         logger.finish()
         return poison_set, logger
 
+    def train_loop(self, model: nn.Module) -> Logs:
+        """Train the model on the clean dataset.
+
+        Parameters:
+            model (Module): an untrained neural network.
+
+        Returns:            
+            logs (Logs): training logs.
+        """
+        train_loader, val_loader = self.make_dataloaders()
+        optimizer = self.make_optimizer()
+        metric = self.make_metrics()
+        return train_val_loop(
+            model,
+            train_loader, val_loader,
+            self.settings.criterion,
+            optimizer,
+            self.hparams.epochs,
+            metric=metric,
+        )
+
     def train_loop_with_poisons(
         self,
         model: nn.Module,
         inverter: GradientInverter,
-    ) -> TensorDataset:
+    ) -> tuple[TensorDataset, Logs]:
         """Train the model with both clean data and poisons crafted by the inverting
         gradient attack.
 
-        Args:
+        Parameters:
             model (Module): an untrained neural network.
             inverter (GradientInverter): the attacking method.
 
         Returns:
             poisons (TensorDataset): the crafted, deduplicated poisons.
+            
+            logs (Logs): training logs.
         """
         train_loader, val_loader = self.make_dataloaders()
         metric = self.make_metrics()
@@ -237,14 +262,15 @@ class Pipeline:
     ) -> tuple[nn.Module, Logs]:
         """Perform unlearning.
 
-        Args:
+        Parameters:
             model (Module): the poisoned model to undergo unlearning.
             forget_loader (DataLoader): the poisoned data to unlearn.
             method (Unlearning): the unlearning algorithm.
 
         Returns:
-            unlearner_logs (tuple[nn.Module, Logs]): a new model after unlearning
-                and training/unlearning logs.
+            unlearner (nn.Module): a new model after unlearning.
+
+            logs (Logs): training and unlearning logs.
         """
         lr = self.hparams.lr
         criterion = self.settings.criterion
@@ -308,7 +334,7 @@ class Pipeline:
     ) -> tuple[nn.Module, PipelineResults]:
         """Run the full gradient inversion poisoning attack and unlearning pipeline.
 
-        Args:
+        Parameters:
             model (Module): the untrained model.
             inverter (GradientInverter): the gradient inversion poisoning attack settings.
             unlearning_method (Unlearning): the unlearning algorithm.
