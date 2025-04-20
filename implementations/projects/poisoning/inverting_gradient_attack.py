@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from enum import Enum
+import dataclasses
+from dataclasses import dataclass
 import numpy as np
 from torch import nn, Tensor
 from torch.nn import functional as F
@@ -31,21 +33,22 @@ NUM_CLASSES = 10
 BATCH_SIZE = 64
 TRAINING_DATA_LEN = 40_000
 
-DEFAULT_LR_SCHED_PARAMS = dict(
-    max_lr = 0.1,
-    epochs = 6,
-    steps_per_epoch = TRAINING_DATA_LEN // BATCH_SIZE,
-)
+@dataclass
+class LRSchedulerParams:
+    max_lr: float = 0.1
+    epochs: int = 6
+    steps_per_epoch: int = TRAINING_DATA_LEN // BATCH_SIZE
 
-DEFAULT_HPARAMS = dict(
-    lr = 1e-3,
-    weight_decay = 5e-4,
-    max_lr = 0.1, # for learning rate scheduling
-    epochs = 6,
-    num_classes = NUM_CLASSES,
-    top_k = {10: 1, 100: 5}[NUM_CLASSES],
-    criterion = CrossEntropyLoss(),
-)
+@dataclass
+class Hyperparams:
+    lr: float = 1e-3
+    weight_decay: float = 5e-4
+    max_lr: float = 0.1 # for learning rate scheduling
+    epochs: int = 6
+    num_classes: int = NUM_CLASSES
+    top_k: int = {10: 1, 100: 5}[NUM_CLASSES]
+    criterion: _Loss = dataclasses.field(default_factory=CrossEntropyLoss)
+
 
 class Unlearning(Enum):
     GRADIENT_DESCENT = 0
@@ -62,6 +65,7 @@ class Pipeline:
 
     Example:
     ```python
+    hparams = Hyperparams()
     estimator = ShadowGradientEstimator(aux_loader)
     sample_init = SampleInitRandomNoise()
     inverter = GradientInverter(method, estimator, steps, sample_init)
@@ -78,16 +82,15 @@ class Pipeline:
             settings: LearningSettings,
             train_loader: DataLoader,
             val_loader: DataLoader = None,
-            **hparams,
+            hparams: Hyperparams = Hyperparams(),
         ):
         self.settings = settings
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.hparams = deepcopy(DEFAULT_HPARAMS)
-        self.hparams.update(**hparams)
+        self.hparams = hparams
 
-        lr = self.hparams['lr']
-        epochs = self.hparams['epochs']
+        lr = self.hparams.lr
+        epochs = self.hparams.epochs
         self.unlearning_hparams = {
             Unlearning.GRADIENT_DESCENT: dict(lr=lr, epochs=1),
             Unlearning.NOISY_GRADIENT_DESCENT: dict(lr=lr, epochs=1, noise_scale=np.sqrt(1e-7)),
@@ -97,11 +100,6 @@ class Pipeline:
             Unlearning.EUK: dict(k=6, lr=lr, epochs=epochs//2),
             Unlearning.SCRUB: dict(max_steps=1, steps=1, alpha=0.1, beta=0.01, gamma=0.9),
         }
-    
-    def __getattr__(self, name: str):
-        if name in self.hparams:
-            return self.hparams[name]
-        raise AttributeError(self, name)
         
     def make_dataloaders(self) -> tuple[DataLoader, DataLoader]:
         # TODO: clone?
@@ -113,15 +111,15 @@ class Pipeline:
         return opt_cls(
             model.parameters(),
             lr=lr,
-            weight_decay=self.weight_decay,
+            weight_decay=self.hparams.weight_decay,
         )
 
     def make_metrics(self) -> MetricCollection:
         return MetricCollection({
             # log per-class accuracy at each step
             'accuracy': MulticlassAccuracy(
-                num_classes=self.num_classes,
-                top_k=self.top_k,
+                num_classes=self.hparams.num_classes,
+                top_k=self.hparams.top_k,
                 average='none',
                 multidim_average='samplewise',
             ),
@@ -205,7 +203,7 @@ class Pipeline:
 
         logs = Logs()
 
-        for epoch in trange(self.epochs, desc='Train epochs', unit='epoch', leave=True):
+        for epoch in trange(self.hparams.epochs, desc='Train epochs', unit='epoch', leave=True):
             poison_set_epoch, logger = self.train_epoch_with_poisons(
                 model,
                 inverter,
@@ -227,16 +225,16 @@ class Pipeline:
         forget_loader: DataLoader,
         method: Unlearning,
     ):
-        lr = self.hparams['lr']
+        lr = self.hparams.lr
         criterion = self.settings.criterion
         # NOTE: train loader is always clean
         train_loader, val_loader = self.make_dataloaders()
 
         unlearner = deepcopy(net)
         
-        hparams: dict = self.unlearning_hparams[method]
-        epochs = hparams['epochs']
-        k = hparams.get('k')
+        uhparams: dict = self.unlearning_hparams[method]
+        epochs = uhparams['epochs']
+        k = uhparams.get('k')
 
         match method:
             case Unlearning.GRADIENT_DESCENT:
@@ -248,7 +246,7 @@ class Pipeline:
             case Unlearning.NOISY_GRADIENT_DESCENT:
                 opt = self.make_optimizer(
                     unlearner, opt_cls=NoisySGD,
-                    lr=lr, noise_scale=hparams['noise_scale'],
+                    lr=lr, noise_scale=uhparams['noise_scale'],
                 )
                 gradient_descent(
                     unlearner, train_loader, val_loader,
@@ -275,8 +273,8 @@ class Pipeline:
                 opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
                 scrub(
                     net, unlearner, train_loader, forget_loader, criterion, opt,
-                    max_steps=hparams['max_steps'], steps=hparams['steps'],
-                    alpha=hparams['alpha'], beta=hparams['beta'], gamma=hparams['gamma'],
+                    max_steps=uhparams['max_steps'], steps=uhparams['steps'],
+                    alpha=uhparams['alpha'], beta=uhparams['beta'], gamma=uhparams['gamma'],
                     keep_pbars=False,
                 )
         
