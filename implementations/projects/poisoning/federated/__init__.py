@@ -18,13 +18,11 @@ class Aggregator(nn.Module, ABC):
     @abstractmethod
     def forward(self, matrix: Tensor) -> Tensor:
         """Computes the aggregation from the input matrix."""
-
-
+    
 class Mean(Aggregator):
     """Computes the coordinate-wise mean."""
     def forward(self, matrix: Tensor) -> Tensor:
         return matrix.mean(dim=0)
-
 
 class Stddev(Aggregator):
     """Computes the coordinate-wise standard deviation."""
@@ -141,12 +139,13 @@ def per_sample_grads(
         y (Tensor): the batch targets.
         criterion (loss): the loss function.
         store_in_params (bool, defaults to False): whether to store
-            the per-sample gradients in the parameters `.grad` field.
+            the per-sample gradients in the parameters `.jac` field.
+            Ensure that `set_jacs_to_none` is called in order to avoid memory leaks.
         append (bool, defaults to False): whether to append additional rows
-            to existing jacobian matrices stored in the `.grad` fields.
+            to existing jacobian matrices stored in the `.jac` fields.
 
     Returns:
-        grads (dict): a dict of the gradients indexed by the parameter names.
+        jacs (dict): a dict of the gradients indexed by the parameter names.
     
     **Important note**: the model must have `track_running_stats=False`
     for each batch normalization layer to be compatible with `torch.func` AD.
@@ -159,10 +158,10 @@ def per_sample_grads(
 
     Example:
     ```python
-    grads = per_sample_grads(model, X, y, criterion)
+    jacs = per_sample_grads(model, X, y, criterion)
     # Manual aggregation
     for (name, param) in model.named_parameters():
-        param.grad = grads[name].mean(dim=0)
+        param.grad = jacs[name].mean(dim=0)
     ```
     """
 
@@ -192,23 +191,23 @@ def per_sample_grads(
     # A function that computes the per-sample gradients on a batch
     ft_compute_sample_grad = ft.vmap(ft_compute_grad, in_dims=(None, None, 0, 0))
 
-    grads: dict = ft_compute_sample_grad(params, buffers, X, y)
+    jacs: dict = ft_compute_sample_grad(params, buffers, X, y)
 
     if store_in_params:
-        for (param, grad) in zip(model.parameters(), grads.values()):
+        for (param, jac) in zip(model.parameters(), jacs.values()):
             # TODO: detach_() to save memory??
             if append and (
-                    isinstance(param.grad, Tensor) and
-                    len(param.grad.shape) == len(param.shape) + 1
+                    hasattr(param, 'jac') and
+                    isinstance(param.jac, Tensor) and
+                    len(param.jac.shape) == len(param.shape) + 1
                 ):
                 # Append to the jacobian matrix
-                param.grad = torch.cat([param.grad, grad])
+                param.jac = torch.cat([param.jac, jac])
             else:
                 # Store the jacobian matrix in the grad field
-                param.grad = grad
+                param.jac = jac
 
-    return grads
-
+    return jacs
 
 def backpropagate_grads(
         model: nn.Module,
@@ -230,24 +229,37 @@ def backpropagate_grads(
     **Important note on batch normalization**: see `per_sample_grads`
     for the requirement on `model`.
     """
-    per_sample_grads(model, X, y, criterion)
+    per_sample_grads(model, X, y, criterion, store_in_params=True)
     aggregate_and_store_grads(model, aggregator)
 
 def aggregate_and_store_grads(model: nn.Module, aggregator: Aggregator):
     """Aggregate the per-sample model gradients and store them. 
 
-    Assumes that the jacobians have already been store in the model with
-    `per_sample_grads(..., store_in_params=True)`.
+    Assumes that the jacobians have already been stored in the model with
+    `per_sample_grads(..., store_in_params=True)`. This also sets the parameters
+    `.jac` fields to `None`.
 
     Args:
         model (Module): a neural network
         aggregator (Aggregator): the gradient aggregation method.
     """
-    agg_grads = aggregate([param.grad for param in model.parameters()], aggregator)
+    agg_grads = aggregate([param.jac for param in model.parameters()], aggregator)
 
     # The parameter order is preserved by dict
     for (param, grad) in zip(model.parameters(), agg_grads):
+        param.jac = None
         param.grad = grad
+
+def set_jacs_to_none(x: Tensor | nn.Module):
+    """Delete the per-sample gradients of a tensor or a model."""
+    if isinstance(x, nn.Module):
+        for param in x.parameters():
+            set_jacs_to_none(param)
+    elif isinstance(x, Tensor):
+        if hasattr(x, 'jac'):
+            x.jac = None
+    else:
+        raise TypeError(x.__class__.__name__)
 
 
 @deprecated("This is an internal test only intended for early iterations of the code.")

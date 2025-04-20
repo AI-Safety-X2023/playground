@@ -99,7 +99,7 @@ class OmniscientGradientEstimator(GradientEstimator):
 
         # Otherwise, aggregate jacobians
         aggregator = fed.Mean()
-        jacs = [param.grad for param in model.parameters()]
+        jacs = [param.jac for param in model.parameters()]
         assert all(jac.shape[0] == jacs[0].shape[0] for jac in jacs)
         matrix = fed.combine_jacobians(jacs)
         return aggregator(matrix)
@@ -107,7 +107,7 @@ class OmniscientGradientEstimator(GradientEstimator):
     def std_clean_gradient(self, model: nn.Module, criterion: _Loss) -> Tensor:
         """Assumes jacobians have been stored with `federated.per_sample_grads`."""
         aggregator = fed.Stddev()
-        jacs = [param.grad for param in model.parameters()]
+        jacs = [param.jac for param in model.parameters()]
         matrix = fed.combine_jacobians(jacs)
         return aggregator(matrix)
     
@@ -137,7 +137,9 @@ class ShadowGradientEstimator(GradientEstimator):
         model = deepcopy(model)
         X, y = next(self.aux_loader_iter)
         fed.per_sample_grads(model, X, y, criterion, store_in_params=True)
-        return OmniscientGradientEstimator().std_clean_gradient(model, criterion)
+        std = OmniscientGradientEstimator().std_clean_gradient(model, criterion)
+        fed.set_jacs_to_none(model)
+        return std
 
 
 class SampleInit(ABC):
@@ -242,6 +244,10 @@ class LearningSettings:
                 Defaults to `None`. Required for the LIE attack.
             num_byzantine (int): the number of poisoned machines.
                 Defaults to `None`. Required for the LIE attack.
+        
+        :note: `num_byzantine` is the true number of byzantine suppliers, which is usually
+        different from `Krum.num_byzantine` in general, since the latter is the maximum
+        number of byzantine suppliers to defend against.
         """
         self.criterion = criterion
         self.aggregator = aggregator
@@ -388,20 +394,21 @@ class GradientInverter:
             target_grad (Tensor): the target gradient.
         """
         clean_batch_size = settings.num_clean
+
+        # Get the per-sample clean gradients
         if isinstance(self.estimator, OmniscientGradientEstimator):
-            # The true per-sample gradients are already stored in model parameters .grad field
+            # The true per-sample gradients are already stored in model parameters .jac field
             assert all(
                 clean_batch_size == param.grad.shape[0]
                 for param in model.parameters()
             )
+            jacs = [param.jac for param in model.parameters()]
         elif isinstance(self.estimator, ShadowGradientEstimator):
             X, y = next(self.estimator.aux_loader_iter)
-            # Store some shadow per-sample gradients in model parameters .grad field
-            fed.per_sample_grads(model, X, y, settings.criterion, store_in_params=True)
+            # Compute some shadow per-sample gradients
+            jacs = list(fed.per_sample_grads(model, X, y, settings.criterion).values())
             assert clean_batch_size == len(X)
 
-        # Get the per-sample clean gradients
-        jacs = [param.grad for param in model.parameters()]
         jac_matrix = fed.combine_jacobians(jacs)
 
         avg_grad = fed.Mean()(jac_matrix).requires_grad_(False)
