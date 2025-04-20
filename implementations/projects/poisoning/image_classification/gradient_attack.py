@@ -198,6 +198,62 @@ class NeverUpdate(Schedule):
         return False
 
 
+class LearningSettings:
+    """The targeted learning algorithm and threat model settings.
+
+    We consider the learning setting given by Bouaziz et al. (2024):
+    Inverting Gradients Makes Powerful Data Poisoning [1].
+
+    For now, we constrain ourselves to *FedSGD* with data poisoning:
+    - At every step, the workers send one data point each.
+    - The central machine computes and aggregates the gradients itself.
+    - Some of the workers are "byzantine", controlled by a single attacker who can send
+        arbitrary valid data to the central machine.
+
+    *FedSGD* is an equivalent version of centralized learning. In this context, the data
+    suppliers may be malicious, but the reported gradients are always honest, contrary
+    to vanilla gradient attacks.
+    For now, we do not consider other federated learning settings such as *FedAvg*
+    and *LocalSGD*.
+
+    The attacker has knowledge of all of these learning settings and uses them
+    to perform the attack. In particular, LIE requires the full knowledge as described
+    by this class.
+
+    [1]: https://arxiv.org/abs/2410.21453
+    """
+    # TODO: this class describes the attacker's power and its fixed knowledge.
+    # We can also add variable knowledge (model weights, batch or aux. dataset)
+    # This would be a partially stateless knowledge module like `GradientEstimator`.
+    def __init__(
+            self,
+            criterion: _Loss,
+            aggregator: fed.Aggregator = None,
+            num_clean: int = None,
+            num_byzantine: int = None,
+        ):
+        """Initialize the target settings.
+
+        Parameters:
+            criterion (_Loss or function): the loss function used by the defender.
+            aggregator (Aggregator): the aggregator used by the defender.
+                Defaults to `None`. Required for the LIE attack.
+            num_clean (int): the clean batch size, i.e the number of clean machines.
+                Defaults to `None`. Required for the LIE attack.
+            num_byzantine (int): the number of poisoned machines.
+                Defaults to `None`. Required for the LIE attack.
+        """
+        self.criterion = criterion
+        self.aggregator = aggregator
+        self.num_clean = num_clean
+        self.num_byzantine = num_byzantine
+    
+    @property
+    def poison_factor(self) -> float:
+        """The proportion of poisoned machines owned by the attacker."""
+        return self.num_byzantine / (self.num_clean + self.num_byzantine)
+
+
 class GradientInverter:
     """Inverting gradient attack."""
     def __init__(
@@ -246,9 +302,7 @@ class GradientInverter:
                 loss_atk = cos_sim ** 2
 
             case GradientAttack.LITTLE_IS_ENOUGH:
-                # See Algorithm 3 in https://arxiv.org/pdf/1902.06156
-                # Estimate per-coordinate gradient std dev. with GradientEstimator
-                raise NotImplementedError
+                loss_atk = F.mse_loss(model_grad, target_grad)
 
         if self.tv_coef:
             assert x_p is not None
@@ -273,7 +327,97 @@ class GradientInverter:
             x_p,
         )
     
-    def attack(self, model: nn.Module, criterion: _Loss) -> tuple[Tensor, Tensor]:
+    def _lie_find_std_factor(
+            self,
+            settings: LearningSettings,
+            jac_matrix: Tensor, avg_grad: Tensor, std_grad: Tensor,
+            z_init = 1.0, threshold = 0.1, # TODO: adjust and justify these values
+        ) -> Tensor:
+        """Find the best factor to deviate the (estimated) average gradient
+        for Little Is Enough attack. This is the gradient attack specified in Algorithm 1
+        of Shejwalkar and Houmansadr, *Manipulating the Byzantine* (2021) [1]
+
+        Returns:
+            z (Tensor): A single positive floating-point factor.
+        
+        [1] <https://www.semanticscholar.org/paper/be10a3afb028e971f38fa80347e4bd826724b86a>
+        """
+        aggregator = settings.aggregator
+        clean_batch_size = settings.num_clean
+        num_harmful = settings.num_byzantine
+
+        # Expand Jacobian matrix with the harmful gradients
+        jac_matrix = torch.cat((jac_matrix, torch.zeros(num_harmful, jac_matrix.shape[1])))
+
+        # TODO: Algorithm 1 in
+        # https://www.semanticscholar.org/paper/be10a3afb028e971f38fa80347e4bd826724b86a
+        z = z_init
+        z_succ = float('inf')
+        step = z_init / 2
+        while abs(z_succ - z) > threshold:
+
+            # Update the poisoned gradients in the Jacobian matrix
+            poisoned_grads = (avg_grad - z * std_grad).unsqueeze(0).expand(num_harmful, -1) #pour etre en [1,D] puis [num_harmful,D]
+            jac_matrix[clean_batch_size:] = poisoned_grads
+
+            # Compute the number of gradients selected by the aggregator
+            if isinstance(aggregator, fed.Krum):
+                selection = aggregator.weights(jac_matrix)
+                num_selected = selection[clean_batch_size:].sum()
+                # TODO
+            elif isinstance(aggregator, fed.Mean):
+                raise NotImplementedError(
+                    "We do not implement LIE against non-robust gradient aggregation "
+                    "since the LIE optimization problem is unbounded for `Mean`."
+                )
+            else:
+                raise RuntimeError(f"Unknown aggregator: {aggregator.__class__}")
+            
+            if num_selected >= 1 :
+                z_succ = z
+                z = z + step / 2
+            else:
+                z = z - step / 2
+            step = step / 2
+        return z_succ
+
+    def lie_attack(self, model: nn.Module, settings: LearningSettings) -> Tensor:
+        """Find the target gradient for the Little Is Enough attack.
+
+        Returns:
+            target_grad (Tensor): the target gradient.
+        """
+        clean_batch_size = settings.num_clean
+        if isinstance(self.estimator, OmniscientGradientEstimator):
+            # The true per-sample gradients are already stored in model parameters .grad field
+            assert all(
+                clean_batch_size == param.grad.shape[0]
+                for param in model.parameters()
+            )
+        elif isinstance(self.estimator, ShadowGradientEstimator):
+            X, y = next(self.estimator.aux_loader_iter)
+            # Store some shadow per-sample gradients in model parameters .grad field
+            fed.per_sample_grads(model, X, y, settings.criterion, store_in_params=True)
+            assert clean_batch_size == len(X)
+
+        # Get the per-sample clean gradients
+        jacs = [param.grad for param in model.parameters()]
+        jac_matrix = fed.combine_jacobians(jacs)
+
+        avg_grad = fed.Mean()(jac_matrix).requires_grad_(False)
+        std_grad = fed.Stddev()(jac_matrix).requires_grad_(False)
+
+        z = self._lie_find_std_factor(settings, jac_matrix, avg_grad, std_grad)
+        
+        # Calculate the final gradient of the attack (LIE)
+        return avg_grad + z * std_grad
+    
+    def attack(
+            self,
+            model: nn.Module,
+            criterion: _Loss = None,
+            settings: LearningSettings = None,
+        ) -> tuple[Tensor, Tensor]:
         """Create a poisoned data point with an inverting gradient attack.
         
         This function assumes that batch loss jacobians have been computed
@@ -282,7 +426,17 @@ class GradientInverter:
         **WARNING**: do not deepcopy the model before calling this function
         as the gradients will not be copied along.
 
-        ## Examples
+        Parameters:
+            model (Module): the targeted neural network weights at the current step.
+            criterion (_Loss, optional): the defender's loss function. Mutually exclusive
+                with :param:`settings`
+            settings (LearningSettings, optional): the learning settings and threat model.
+                Required for *Little Is Enough*.
+        
+        Returns:
+            x_y (tuple): the crafted poison to be used by all malicious workers.
+
+        Examples:
         For all attacks except *Little Is Enough*:
         ```python
         inverter = GradientInverter(
@@ -303,7 +457,7 @@ class GradientInverter:
             sample_init=SampleInitRandomNoise(aux_data),
         )
         per_sample_grads(model, X, y, criterion, store_in_params=True)
-        X_p, y_p = inverter.attack(model, criterion)
+        X_p, y_p = inverter.attack(model, settings)
         ```
         """
         # FIXME: not reliable
@@ -311,8 +465,12 @@ class GradientInverter:
         num_classes = len(training_data.classes)
         device = _detect_device(model)
 
-        # TODO: log gradient estimation quality
-        target_grad = self.estimator.average_clean_gradient(model, criterion)
+        if self.method == GradientAttack.LITTLE_IS_ENOUGH:
+            # TODO: report number of selected gradients
+            target_grad = self.lie_attack(model, settings)
+        else:
+            # TODO: log gradient estimation quality
+            target_grad = self.estimator.average_clean_gradient(model, criterion)
         target_grad.requires_grad_(False)
         
         # This detaches the model and its gradients
