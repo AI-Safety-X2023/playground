@@ -20,7 +20,7 @@ from .utils import tqdm, trange
 
 class MetricLogger:
     def __init__(
-            self, *metrics,
+            self, *metrics: Metric,
             device=BEST_DEVICE,
             desc='Train loop', total: int = None, keep_pbars=True
         ):
@@ -43,7 +43,18 @@ class MetricLogger:
         self.avg_loss(loss)
         metric_values = {'avg_loss': self.avg_loss.compute().item()}
         for name, metric in self.metrics.items():
-            metric_values[name] = metric(logits, y).item()
+            value = metric(logits, y)
+            if isinstance(value, dict):
+                for n, v in value:
+                    assert isinstance(v, Tensor)
+                    if len(v.shape) >= 1:
+                        v = v.mean()
+                    metric_values[n] = v
+            else:
+                assert isinstance(value, Tensor)
+                if len(value.shape) >= 1:
+                        value = value.mean()
+                metric_values[name] = value.item()
 
         self.pbar.n += len(X)
         self.pbar.set_postfix(**metric_values)
