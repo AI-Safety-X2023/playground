@@ -39,6 +39,25 @@ class Krum(Aggregator):
         self.num_byzantine = num_byzantine
         self.num_selected = num_selected
     
+    @classmethod
+    def with_learning_settings(cls, batch_size: int, alpha: float) -> "Krum":
+        """Configure multi-KRUM in byzantine machine learning.
+
+        Parameters:
+            batch_size (int): the clean data batch size.
+                **Warning** : this is not the true batch size since it does not
+                include poisons, the latter are artificially inserted into the batch.
+            alpha (float): the maximum proportion of poisons to defend against.
+
+        Returns:
+            aggregator (Krum): a robust aggregator.
+        """
+        alpha = 0.1
+        f = int(alpha / (1 - alpha) * batch_size)
+        n = batch_size + f
+        m = n - (2 * f + 3)
+        return Krum(f, m)
+    
     def weights(self, matrix: Tensor) -> Tensor:
         assert matrix.shape[0] >= self.num_byzantine + 3
         assert matrix.shape[0] >= self.num_selected
