@@ -241,7 +241,11 @@ class Pipeline:
             else:
                 raise NotImplementedError(f"Unknown aggregator: {aggregator.__class__}")
             
-            poison_set.append(X_p, y_p)
+            for _ in range(f):
+                # Repeat the poisons at identical in the poison set.
+                # This is necessary so that unlearning can perform enough steps
+                poison_set.append(X_p, y_p)
+            
             optimizer.step()
             optimizer.zero_grad()
             
@@ -376,10 +380,9 @@ class Pipeline:
                 )
             case Unlearning.NEG_GRAD_PLUS:
                 opt = self.make_optimizer(unlearner, opt_cls=SGD, lr=lr)
-                # TODO: add validation
                 logs = neg_grad_plus_loop(
                     unlearner, train_loader, forget_loader,
-                    criterion, opt, epochs=epochs,
+                    criterion, opt, val_loader=val_loader, epochs=epochs,
                     keep_pbars=False, metric=metric,
                 )
             case Unlearning.EUK:
@@ -392,9 +395,9 @@ class Pipeline:
                     )
             case Unlearning.SCRUB:
                 opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
-                # TODO: add validation
                 logs = scrub(
                     model, unlearner, train_loader, forget_loader, criterion, opt,
+                    val_loader=val_loader,
                     max_steps=uhparams['max_steps'], steps=uhparams['steps'],
                     alpha=uhparams['alpha'], beta=uhparams['beta'], gamma=uhparams['gamma'],
                     keep_pbars=False, metric=metric,

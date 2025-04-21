@@ -11,7 +11,11 @@ from torch.optim import Optimizer, SGD
 from torchmetrics import Metric
 
 from .utils import tqdm, trange
-from .nn import MetricLogger, Logs, distillation_epoch, train_val_loop, _detect_device
+from .nn import (
+    MetricLogger, Logs,
+    test_epoch, distillation_epoch, train_val_loop,
+    _detect_device,
+)
 
 
 def model_layers(model: nn.Module, first: int, last: int):
@@ -235,6 +239,7 @@ def neg_grad_plus_loop(
         beta=0.999,
         keep_pbars=True,
         metric: Metric = None,
+        val_loader: DataLoader = None,
     ) -> Logs:
     logs = Logs()
     for epoch in trange(epochs, desc='NegGrad+ epochs', unit='epoch', leave=keep_pbars):
@@ -247,6 +252,13 @@ def neg_grad_plus_loop(
             metric=metric,
         )
         logs.update_train_epoch(logger)
+
+        if val_loader is not None:
+            logger = test_epoch(
+                model, val_loader, loss_fn,
+                keep_pbars=keep_pbars, metric=metric,
+            )
+            logs.update_val_epoch(logger)
     return logs
 
 def oracle_unlearning(
@@ -362,6 +374,7 @@ def scrub(
         gamma=0.9,
         keep_pbars=True,
         metric: Metric = None,
+        val_loader: DataLoader = None,
     ) -> Logs:
     """SCRUB algorithm from Kurmanji et al.
     
@@ -399,6 +412,13 @@ def scrub(
             keep_pbars=keep_pbars, metric=metric,
         )
         logs.update_train_epoch(logger)
+
+        if val_loader is not None:
+            logger = test_epoch(
+                student, val_loader, loss_fn,
+                keep_pbars=keep_pbars, metric=metric,
+            )
+            logs.update_val_epoch(logger)
     
     return logs
 

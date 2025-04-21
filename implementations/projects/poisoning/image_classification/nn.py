@@ -243,7 +243,7 @@ def train_val_loop(
         lr_scheduler: LRScheduler = None,
         keep_pbars=True,
         metric: Metric = None,
-        validate_every: int = 2,
+        validate_every: int = 1,
         early_stopping = True,
     ) -> Logs:
     """Run the training loop on the model with periodic validation.
