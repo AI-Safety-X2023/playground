@@ -48,6 +48,7 @@ class MetricLogger:
                 metric.increment()
 
             value = metric(logits, y)
+            
             if isinstance(value, dict):
                 for n, v in value.items():
                     assert isinstance(v, Tensor)
@@ -290,6 +291,7 @@ def distillation_epoch(
         optimizer: Optimizer,
         criterion,
         keep_pbars=True,
+        metric: Metric = None,
     ) -> MetricLogger:
     """
     Perform a single epoch of knowledge distillation in a student-teacher method.
@@ -307,6 +309,7 @@ def distillation_epoch(
     teacher.eval()
 
     logger = MetricLogger(
+        metric,
         desc='Transfer learning epoch', total=len(dataloader.dataset), keep_pbars=keep_pbars,
     )
 

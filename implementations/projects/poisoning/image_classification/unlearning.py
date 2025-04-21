@@ -8,6 +8,7 @@ from torch.nn import functional as F
 from torch.nn.modules.loss import _Loss
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import Optimizer, SGD
+from torchmetrics import Metric
 
 from .utils import tqdm, trange
 from .nn import MetricLogger, Logs, distillation_epoch, train_val_loop, _detect_device
@@ -173,6 +174,7 @@ def neg_grad_plus(
         optimizer: Optimizer,
         beta=0.999,
         keep_pbars=True,
+        metric: Metric = None,
     ) -> MetricLogger:
     """NegGrad+ algorithm from Kurmanji et al.
     
@@ -191,6 +193,7 @@ def neg_grad_plus(
     model.train()
 
     logger = MetricLogger(
+        metric,
         desc='NegGrad+', total=len(forget.dataset), keep_pbars=keep_pbars,
     )
     
@@ -205,8 +208,10 @@ def neg_grad_plus(
         X_f, y_f = X_f.to(device), y_f.to(device)
 
         # Compute prediction and loss
-        loss_f = loss_fn(model(X_f), y_f)
-        loss_r = loss_fn(model(X_r), y_r)
+        logits_f = model(X_f)
+        logits_r = model(X_r)
+        loss_f = loss_fn(logits_f, y_f)
+        loss_r = loss_fn(logits_r, y_r)
 
         loss = beta * loss_r - (1. - beta) * loss_f
 
@@ -215,7 +220,7 @@ def neg_grad_plus(
         optimizer.step()
         optimizer.zero_grad()
 
-        logger.compute_metrics(X_f, y_f, None, loss.item())
+        logger.compute_metrics(X_r, y_r, logits_r, loss.item())
     
     logger.finish()
     return logger
@@ -229,6 +234,7 @@ def neg_grad_plus_loop(
         epochs: int,
         beta=0.999,
         keep_pbars=True,
+        metric: Metric = None,
     ) -> Logs:
     logs = Logs()
     for epoch in trange(epochs, desc='NegGrad+ epochs', unit='epoch', leave=keep_pbars):
@@ -238,6 +244,7 @@ def neg_grad_plus_loop(
             loss_fn, optimizer,
             beta=beta,
             keep_pbars=keep_pbars,
+            metric=metric,
         )
         logs.update_train_epoch(logger)
     return logs
@@ -291,6 +298,7 @@ def scrub_unlearning_epoch(
         optimizer: Optimizer,
         beta=0.01,
         keep_pbars=True,
+        metric: Metric = None,
     ) -> MetricLogger:
     """
     This corresponds to the Algorithm 2: `DO-MAX-EPOCH` in the SCRUB paper.
@@ -307,7 +315,7 @@ def scrub_unlearning_epoch(
         forget,
         optimizer,
         criterion,
-        keep_pbars,
+        keep_pbars=keep_pbars, metric=metric,
     )
 
 def scrub_learning_epoch(
@@ -319,6 +327,7 @@ def scrub_learning_epoch(
         alpha=0.1,
         gamma=0.9,
         keep_pbars=True,
+        metric: Metric = None,
     ) -> MetricLogger:
     """
     This corresponds to the Algorithm 3: `DO-MIN-EPOCH` in the SCRUB paper.
@@ -336,7 +345,7 @@ def scrub_learning_epoch(
         retain,
         optimizer,
         criterion,
-        keep_pbars,
+        keep_pbars=keep_pbars, metric=metric,
     )
 
 def scrub(
@@ -352,6 +361,7 @@ def scrub(
         beta=0.01,
         gamma=0.9,
         keep_pbars=True,
+        metric: Metric = None,
     ) -> Logs:
     """SCRUB algorithm from Kurmanji et al.
     
@@ -378,15 +388,15 @@ def scrub(
                 forget,
                 optimizer,
                 beta,
-                keep_pbars,
+                keep_pbars=keep_pbars, metric=metric,
             )
-            logs.update_train_epoch(logger)
+            logs.update_unlearn_epoch(logger)
         logger = scrub_learning_epoch(
             teacher, student,
             retain,
             loss_fn, optimizer,
             alpha, gamma,
-            keep_pbars,
+            keep_pbars=keep_pbars, metric=metric,
         )
         logs.update_train_epoch(logger)
     

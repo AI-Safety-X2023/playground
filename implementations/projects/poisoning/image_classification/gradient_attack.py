@@ -122,9 +122,13 @@ class ShadowGradientEstimator(GradientEstimator):
     
     # NOTE: Assumes that `criterion.reduction == 'mean'`
     def average_clean_gradient(self, model: nn.Module, criterion: _Loss) -> Tensor:
+        device = _detect_device(model)
+
         # Copy the model since we modify its gradients
         model = deepcopy(model)
         X, y = next(self.aux_loader_iter)
+        X, y = X.to(device), y.to(device)
+
         loss = criterion(model(X), y)
         loss.backward()
         return combined_model_gradients(model)
