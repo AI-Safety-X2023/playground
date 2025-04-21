@@ -67,6 +67,9 @@ class GradientEstimator(ABC):
         """
         Estimate the gradient per-coordinate standard deviation on a clean-distributed dataset.
         """
+    
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}()"
 
 
 class OmniscientGradientEstimator(GradientEstimator):
@@ -118,6 +121,7 @@ class ShadowGradientEstimator(GradientEstimator):
     that is similarly distributed to the training dataset.
     """
     def __init__(self, aux_loader: DataLoader):
+        self._data_len = len(aux_loader.dataset)
         self.aux_loader_iter = iter(cycle(aux_loader))
     
     # NOTE: Assumes that `criterion.reduction == 'mean'`
@@ -145,7 +149,12 @@ class ShadowGradientEstimator(GradientEstimator):
         fed.set_jacs_to_none(model)
         return std
 
-
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}"
+            f"(aux_loader = DataLoader(<data_len={self._data_len}>))"
+        )
+    
 class SampleInit(ABC):
     """Sample initialization method for inverting gradient attacks."""
     def __init__(self, dataset: Dataset):
@@ -154,6 +163,9 @@ class SampleInit(ABC):
     @abstractmethod
     def __call__(self) -> tuple[Tensor, Tensor]:
         """Returns the initial input and label."""
+    
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}()"
 
 
 class SampleInitRandomNoise(SampleInit):
@@ -186,6 +198,9 @@ class Schedule(ABC):
     @abstractmethod
     def __call__(self, step: int) -> bool:
         """Returns whether an update should be performed at this step."""
+    
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}()"
 
 
 class PowerofTwoSchedule(Schedule):
@@ -262,6 +277,12 @@ class LearningSettings:
     def poison_factor(self) -> float:
         """The proportion of poisoned machines owned by the attacker."""
         return self.num_byzantine / (self.num_clean + self.num_byzantine)
+    
+    def __repr__(self) -> str:
+        return (
+            f"LearningSettings(criterion={self.criterion}, aggregator={self.aggregator}, "
+            f"num_clean={self.num_clean}, num_byzantine={self.num_byzantine})"
+        )
 
 
 class GradientInverter:
@@ -543,6 +564,14 @@ class GradientInverter:
 
         y_p = y_p.argmax()
         return x_p, y_p
+    
+    def __repr__(self):
+        return (
+            f"GradientInverter("
+            f"method={self.method}, estimator={self.estimator}, steps={self.steps}, "
+            f"tv_coef={self.tv_coef}, lr={self.lr}, sample_init={self.sample_init}, "
+            f"label_update_schedule={self.label_update_schedule})"
+        )
 
 
 def combined_model_gradients(model: nn.Module) -> Tensor:

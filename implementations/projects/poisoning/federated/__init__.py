@@ -76,6 +76,9 @@ class Krum(Aggregator):
     
     def forward(self, matrix: Tensor) -> Tensor:
         return self.weights(matrix) @ matrix
+    
+    def __repr__(self):
+        return f"Krum(num_byzantine={self.num_byzantine}, num_selected={self.num_selected})"
 
 
 # TODO: improve memory consumption (delete original tensors?)

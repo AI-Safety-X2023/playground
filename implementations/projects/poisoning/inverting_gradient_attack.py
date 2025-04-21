@@ -292,6 +292,8 @@ class Pipeline:
             
             logs (Logs): training logs.
         """
+        print("Poisoning", self._fmt_poisoning(inverter))
+
         train_loader, val_loader = self.make_dataloaders()
         metric = self.make_metrics()
         poison_set = UpdatableDataset()
@@ -333,6 +335,8 @@ class Pipeline:
 
             logs (Logs): training and unlearning logs.
         """
+        print("Running", self._fmt_unlearning(method))
+
         lr = self.hparams.lr
         criterion = self.settings.criterion
         # NOTE: train loader is always clean
@@ -372,6 +376,7 @@ class Pipeline:
                 )
             case Unlearning.NEG_GRAD_PLUS:
                 opt = self.make_optimizer(unlearner, opt_cls=SGD, lr=lr)
+                # TODO: add validation
                 logs = neg_grad_plus_loop(
                     unlearner, train_loader, forget_loader,
                     criterion, opt, epochs=epochs,
@@ -380,19 +385,22 @@ class Pipeline:
             case Unlearning.EUK:
                 opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
                 with unlearning_last_layers(unlearner, k, 'euk'):
-                    logs = train_loop(
-                        unlearner, train_loader,
+                    logs = train_val_loop(
+                        unlearner, train_loader, val_loader,
                         criterion, opt, epochs=epochs,
                         keep_pbars=False, metric=metric,
                     )
             case Unlearning.SCRUB:
                 opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
+                # TODO: add validation
                 logs = scrub(
                     model, unlearner, train_loader, forget_loader, criterion, opt,
                     max_steps=uhparams['max_steps'], steps=uhparams['steps'],
                     alpha=uhparams['alpha'], beta=uhparams['beta'], gamma=uhparams['gamma'],
                     keep_pbars=False, metric=metric,
                 )
+            case _:
+                raise NotImplementedError(method)
         
         return unlearner, logs
     
@@ -480,6 +488,23 @@ class Pipeline:
             train_logs=train_logs,
             unlearn_logs=unlearn_logs,
             poison_set=forget_set,
+        )
+    
+    def _fmt_poisoning(self, inverter: GradientInverter) -> str:
+        return f"{inverter} with hparams={self.hparams})"
+    
+    def _fmt_unlearning(self, unlearning_method: Unlearning) -> str:
+        return (
+            f"{unlearning_method._name_} with "
+            f"unlearning_hparams={self.unlearning_hparams[unlearning_method]})"
+        )
+    
+    def __repr__(self):
+        return (
+            f"Pipeline(settings={self.settings}, "
+            f"train_loader=Dataloader(<len={len(self.train_loader.dataset)}>), "
+            f"val_loader=Dataloader(<len={len(self.val_loader.dataset)}>), "
+            f"hparams={self.hparams}, unlearning_hparams={self.unlearning_hparams})"
         )
 
 
