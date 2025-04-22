@@ -242,7 +242,7 @@ class Pipeline:
                 poison_indices = np.arange(len(X), len(X) + f)
                 num_selected_poisons = aggregator.num_selected_among(poison_indices, model)
                 logger.compute_additional_metrics(
-                    'num_selected_poisons',
+                    ['num_selected_poisons'],
                     num_selected_poisons,
                 )
 
@@ -264,7 +264,7 @@ class Pipeline:
             # TODO: log loss on poisons
             # TODO: display some poisons
             logger.compute_metrics(X, y, logits, loss.item())
-            #logger.compute_additional_metrics('avg_poison_loss', loss_p)
+            #logger.compute_additional_metrics(['avg_poison_loss'], loss_p)
         
         logger.finish()
         return poison_set, logger

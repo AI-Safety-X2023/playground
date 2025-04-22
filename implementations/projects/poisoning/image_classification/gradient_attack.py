@@ -406,7 +406,7 @@ class GradientInverter:
     def _lie_find_std_factor(
             self,
             settings: LearningSettings,
-            jac_matrix: Tensor, avg_grad: Tensor, std_grad: Tensor,
+            jac_matrix: Tensor, agg_grad: Tensor, std_grad: Tensor,
             z_init = 1.0, threshold = 0.1, # TODO: adjust and justify these values
         ) -> Tensor:
         """Find the best factor to deviate the (estimated) average gradient
@@ -434,9 +434,12 @@ class GradientInverter:
         z_succ = float('inf')
         step = z_init / 2
         while abs(z_succ - z) > threshold:
+            if step / 2 < threshold:
+                #print(f"Poison was never selected even under {threshold}")
+                return z
 
             # Update the poisoned gradients in the Jacobian matrix
-            poisoned_grads = (avg_grad - z * std_grad).unsqueeze(0).expand(num_harmful, -1) #pour etre en [1,D] puis [num_harmful,D]
+            poisoned_grads = (agg_grad - z * std_grad).unsqueeze(0).expand(num_harmful, -1)
             jac_matrix[clean_batch_size:] = poisoned_grads
 
             # Compute the number of gradients selected by the aggregator
@@ -453,10 +456,12 @@ class GradientInverter:
             
             if num_selected >= 1 :
                 z_succ = z
-                z = z + step / 2
+                z = z + step
             else:
-                z = z - step / 2
+                z = z - step
             step = step / 2
+        
+        #print(f"Success ({num_selected=})!")
         return z_succ
 
     def lie_attack(self, model: nn.Module, settings: LearningSettings) -> Tensor:
@@ -485,13 +490,13 @@ class GradientInverter:
 
         jac_matrix = fed.combine_jacobians(jacs)
 
-        avg_grad = fed.Mean()(jac_matrix).requires_grad_(False)
+        agg_grad = settings.aggregator(jac_matrix).requires_grad_(False)
         std_grad = fed.Stddev()(jac_matrix).requires_grad_(False)
 
-        z = self._lie_find_std_factor(settings, jac_matrix, avg_grad, std_grad)
+        z = self._lie_find_std_factor(settings, jac_matrix, agg_grad, std_grad)
         
         # Calculate the final gradient of the attack (LIE)
-        return avg_grad + z * std_grad
+        return agg_grad + z * std_grad
     
     def attack(
             self,

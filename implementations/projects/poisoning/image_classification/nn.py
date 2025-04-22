@@ -58,7 +58,7 @@ class MetricLogger:
     @property
     def all_metrics(self) -> dict[str, Metric]:
         """The training metrics and the additional metrics."""
-        self.metrics | self.additional_metrics
+        return self.metrics | self.additional_metrics
 
     # TODO: do not teat loss separately and include it in metrics
     def compute_metrics(

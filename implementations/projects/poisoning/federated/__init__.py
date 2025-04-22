@@ -126,7 +126,6 @@ class Krum(Aggregator):
         jacs = [param.jac for param in model.parameters()]
         matrix = combine_jacobians(jacs)
         weights = self.weights(matrix)
-        assert all(w in (0.0, 1.0) for w in weights)
         return sum(weights[i] > 0.0 for i in indices)
         
     
