@@ -7,6 +7,7 @@ from torch import nn, Tensor
 from torch.nn import functional as F
 from torch.nn.modules.loss import _Loss
 from torch.optim import Adam
+from torch.optim.lr_scheduler import LinearLR
 from torch.utils.data import Dataset, DataLoader
 from torchmetrics.functional import total_variation
 
@@ -294,7 +295,7 @@ class GradientInverter:
             steps: int,
             sample_init: SampleInit,
             tv_coef = 0.0, # TODO: more ergonomic interface
-            lr = 0.2, # TODO: find appropriate lr scheduling step
+            lr = 0.3, # TODO: find appropriate lr scheduling step
             label_update_schedule: Schedule = PowerofTwoSchedule(),
         ):
         self.method = method
@@ -333,7 +334,7 @@ class GradientInverter:
                 loss_atk = cos_sim ** 2
 
             case GradientAttack.LITTLE_IS_ENOUGH:
-                loss_atk = F.mse_loss(model_grad, target_grad)
+                loss_atk = (model_grad - target_grad).pow(2).sum() / target_grad.pow(2).sum()
 
         if self.tv_coef:
             assert x_p is not None
@@ -517,6 +518,7 @@ class GradientInverter:
         y_p = F.one_hot(y_p, num_classes).float().to(device)
         # We optimize on the image...
         opt = Adam([x_p], lr=self.lr)
+        lr_sched = LinearLR(opt, start_factor=0.5, total_iters=4)
         # ...and occasionally on the label.
 
         for step in range(self.steps):
@@ -529,13 +531,14 @@ class GradientInverter:
                 model, criterion, differentiable=True,
             )
             # TODO: log stats
-            #print(f"Inverting gradient step {step}: loss = {loss.item()}, loss_atk = {loss_atk.item()}")
+            print(f"Inverting gradient step {step}: loss_atk = {loss_atk.item()}")
             # Clear `loss` gradients on `x_p`
             opt.zero_grad()
 
             # Optimize `x_p`
             loss_atk.backward(inputs=x_p)
             opt.step()
+            lr_sched.step()
             opt.zero_grad()
             model.zero_grad()
 

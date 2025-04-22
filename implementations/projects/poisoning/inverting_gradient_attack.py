@@ -190,6 +190,7 @@ class Pipeline:
         metric = self.make_metrics()
 
         poison_factor = self.settings.poison_factor
+        f = self.settings.num_byzantine
 
         model.train()
         logger = MetricLogger(
@@ -227,7 +228,6 @@ class Pipeline:
 
                 X_p, y_p = inverter.attack(model, criterion, self.settings)
                 # Repeat poisons at identical for each byzantine data supplier
-                f = self.settings.num_byzantine
                 X_p_ = X_p.repeat(f, *([1] * X_p.ndim))
                 y_p_ = y_p.repeat(f, *([1] * y_p.ndim))
                 # This "accumulates" gradients by appending rows in the jacobian matrices
