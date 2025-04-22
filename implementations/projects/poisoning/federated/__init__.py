@@ -27,7 +27,7 @@ class Mean(Aggregator):
 class Stddev(Aggregator):
     """Computes the coordinate-wise standard deviation."""
     def forward(self, matrix: Tensor) -> Tensor:
-        raise NotImplementedError
+        return matrix.std(dim=0)
 
 
 class Krum(Aggregator):
