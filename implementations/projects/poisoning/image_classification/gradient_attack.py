@@ -14,6 +14,7 @@ from torchmetrics.functional import total_variation
 
 import federated as fed
 
+from .accel import BEST_DEVICE
 from .nn import _detect_device, MetricLogger
 from .utils import trange
 from .datasets import EagerDataset
@@ -174,7 +175,11 @@ class ShadowGradientEstimator(GradientEstimator):
     
     def std_clean_gradient(self, model: nn.Module, criterion: _Loss):
         model = deepcopy(model)
+        device = _detect_device(model)
+
         X, y = next(self.aux_loader_iter)
+        X, y = X.to(device), y.to(device)
+
         fed.per_sample_grads(model, X, y, criterion, store_in_params=True)
         std = OmniscientGradientEstimator().std_clean_gradient(model, criterion)
         fed.set_jacs_to_none(model)
@@ -418,7 +423,10 @@ class GradientInverter:
         num_harmful = settings.num_byzantine
 
         # Expand Jacobian matrix with the harmful gradients
-        jac_matrix = torch.cat((jac_matrix, torch.zeros(num_harmful, jac_matrix.shape[1])))
+        jac_matrix = torch.cat((
+            jac_matrix,
+            torch.zeros(num_harmful, jac_matrix.shape[1], device=jac_matrix.device)
+        ))
 
         # TODO: Algorithm 1 in
         # https://www.semanticscholar.org/paper/be10a3afb028e971f38fa80347e4bd826724b86a
@@ -458,6 +466,7 @@ class GradientInverter:
             target_grad (Tensor): the target gradient.
         """
         clean_batch_size = settings.num_clean
+        device = _detect_device(model)
 
         # Get the per-sample clean gradients
         if isinstance(self.estimator, OmniscientGradientEstimator):
@@ -469,6 +478,7 @@ class GradientInverter:
             jacs = [param.jac for param in model.parameters()]
         elif isinstance(self.estimator, ShadowGradientEstimator):
             X, y = next(self.estimator.aux_loader_iter)
+            X, y = X.to(device), y.to(device)
             # Compute some shadow per-sample gradients
             jacs = list(fed.per_sample_grads(model, X, y, settings.criterion).values())
             assert clean_batch_size == len(X)

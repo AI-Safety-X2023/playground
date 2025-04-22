@@ -212,7 +212,7 @@ class Pipeline:
                 loss_c.backward()
 
                 # --- poisoning attack
-                X_p, y_p = inverter.attack(model, criterion)
+                X_p, y_p = inverter.attack(model, criterion, self.settings)
                 # Unsqueeze since model and criterion expect batch
                 X_p_, y_p_ = X_p.unsqueeze(0), y_p.unsqueeze(0)
                 logits_p = model(X_p_)
