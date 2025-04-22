@@ -25,7 +25,7 @@ class MetricLogger:
             self, *metrics: Metric,
             device=BEST_DEVICE,
             desc='Train loop', total: int = None, keep_pbars=True,
-            **additional_metrics: dict[str, Metric],
+            **additional_metrics: Metric,
         ):
         """Initialize the logger and create the progress bar.
 
@@ -54,6 +54,11 @@ class MetricLogger:
         self.pbar = tqdm(desc=desc, total=total, leave=keep_pbars)
         # Forces storage of description even if progress bar is disabled
         self.pbar.desc = desc or ''
+    
+    @property
+    def all_metrics(self) -> dict[str, Metric]:
+        """The training metrics and the additional metrics."""
+        self.metrics | self.additional_metrics
 
     # TODO: do not teat loss separately and include it in metrics
     def compute_metrics(
@@ -129,7 +134,7 @@ class Logs:
             train_logger (MetricLogger, optional): the logger returned by
                 the training epoch.
         """
-        self.train_metrics.append(train_logger.metrics)
+        self.train_metrics.append(train_logger.all_metrics)
     
     def update_val_epoch(self, val_logger: MetricLogger = None):
         """Update the validation metrics of an epoch.
@@ -141,7 +146,7 @@ class Logs:
         if val_logger is None:
             metrics = {}
         else:
-            metrics = val_logger.metrics
+            metrics = val_logger.all_metrics
         self.val_metrics.append(metrics)
     
     def update_unlearn_epoch(self, unlearn_logger: MetricLogger = None):
@@ -154,7 +159,7 @@ class Logs:
         if unlearn_logger is None:
             metrics = {}
         else:
-            metrics = unlearn_logger.metrics
+            metrics = unlearn_logger.all_metrics
         self.unlearn_metrics.append(metrics)
 
 

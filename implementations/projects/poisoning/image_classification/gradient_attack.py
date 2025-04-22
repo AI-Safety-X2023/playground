@@ -38,6 +38,13 @@ class GradientAttack(Enum):
     # https://arxiv.org/abs/1902.06156
     LITTLE_IS_ENOUGH = 2
 
+    def __str__(self):
+        return {
+            GradientAttack.RECONSTRUCTION: "Reconstruction",
+            GradientAttack.ASCENT: "Gradient Ascent",
+            GradientAttack.ORTHOGONAL: "Orthogonal Gradient",
+            GradientAttack.LITTLE_IS_ENOUGH: "Little Is Enough",
+        }[self]
 
 
 # https://github.com/pytorch/pytorch/issues/23900
@@ -617,68 +624,6 @@ class GradientInverter:
             logger.compute_additional_metrics(['loss_atk'], loss_atks.unsqueeze())
         y_p = y_p.argmax()
         return x_p, y_p
-
-    def compute_num_selected(
-            self,
-            x_p: Tensor, y_p: Tensor,
-            model: nn.Module,
-            settings: LearningSettings,
-        ) -> int:
-        """Compute the number of selected gradients by the aggregator.
-
-        Parameters:
-            x_p (Tensor): the poisoned input.
-            y_p (Tensor): the poisoned target.
-            model (Module): the victim model.
-            settings (LearningSettings): the learning settings, assuming the robust
-                aggregator is `Krum`.
-
-        Returns:
-            num_selected (int): the number of selected gradients.
-        """
-        criterion = settings.criterion
-        aggregator = settings.aggregator
-        clean_batch_size = settings.num_clean
-        num_harmful = settings.num_byzantine
-
-        # Get the per-sample clean gradients
-        if isinstance(self.estimator, OmniscientGradientEstimator):
-            # The true per-sample gradients are already stored in model parameters .jac field
-            assert all(
-                clean_batch_size == param.grad.shape[0]
-                for param in model.parameters()
-            )
-            jacs = [param.jac for param in model.parameters()]
-        elif isinstance(self.estimator, ShadowGradientEstimator):
-            X, y = next(self.estimator.aux_loader_iter)
-            # Compute some shadow per-sample gradients
-            jacs = list(fed.per_sample_grads(model, X, y, criterion).values())
-            assert clean_batch_size == len(X)
-
-        jac_matrix = fed.combine_jacobians(jacs)
-
-        # Compute the poisoned gradient
-        y_pred = model(x_p.unsqueeze(0)).squeeze()
-        loss = criterion(y_pred, y_p)
-        loss.backward()
-        harmful_grad = combined_model_gradients(model)
-        model.zero_grad()
-
-        # Expand Jacobian matrix with the harmful gradients
-        jac_matrix = torch.cat((jac_matrix, torch.zeros(num_harmful, jac_matrix.shape[1])))
-        # Update the poisoned gradients in the Jacobian matrix
-        jac_matrix[clean_batch_size:] = harmful_grad.expand(num_harmful, -1)
-
-        # Compute the number of gradients selected by the aggregator
-        if isinstance(aggregator, fed.Krum):
-            selection = aggregator.weights(jac_matrix)
-            return int(selection[clean_batch_size:].sum())
-        else:
-            raise TypeError(
-                f"Can't compute selection rate for aggregator "
-                f"{aggregator.__class__.__name__}"
-            )
-
 
     def __repr__(self):
         return (
