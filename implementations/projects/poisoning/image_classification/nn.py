@@ -20,15 +20,34 @@ from .utils import tqdm, trange
 
 
 class MetricLogger:
+    """A training logger with a progress bar."""
     def __init__(
             self, *metrics: Metric,
             device=BEST_DEVICE,
-            desc='Train loop', total: int = None, keep_pbars=True
+            desc='Train loop', total: int = None, keep_pbars=True,
+            **additional_metrics: dict[str, Metric],
         ):
+        """Initialize the logger and create the progress bar.
+
+        Args:
+            *metrics (Metric): the training metrics. A training metric takes two arguments,
+                the logits and the true labels.
+            device (str, optional): the metric device. Defaults to BEST_DEVICE.
+            desc (str, optional): progress bar description. Defaults to 'Train loop'.
+            total (int, optional): total number of items for progress bar. Defaults to None.
+            keep_pbars (bool, optional): whether to keep progress bars displayed
+                after closing. Defaults to True.
+            **additional_metrics (Metric keywords, optional): any additional metrics
+                to be computed with `compute_additional_metrics`.
+        """
+        # training metrics
         self.metrics = {
             metric._get_name(): metric.to(device)
             for metric in metrics if metric is not None
         }
+        # additional metrics
+        self.additional_metrics = additional_metrics
+        # average loss (special)
         self.avg_loss = MeanMetric().to(device)
 
         # Make a nice progress bar
@@ -36,10 +55,16 @@ class MetricLogger:
         # Forces storage of description even if progress bar is disabled
         self.pbar.desc = desc or ''
 
+    # TODO: do not teat loss separately and include it in metrics
     def compute_metrics(
             self,
             X: Tensor, y: Tensor, logits: Tensor, loss: float,
         ) -> dict[str, Metric]:
+        """Compute the main training metrics.
+        
+        The training metrics take the arguments `(logits, y)`. The `'avg_loss'`
+        mean metric is special and takes the argument `loss`.
+        """
         self.avg_loss(loss)
         metric_values = {'avg_loss': self.avg_loss.compute().item()}
         for name, metric in self.metrics.items():
@@ -65,10 +90,12 @@ class MetricLogger:
         self.pbar.set_postfix(**metric_values)
     
     def compute_additional_metrics(self, metric_names: list[str], *args):
+        """Compute the additional metrics with custom arguments."""
         for name in metric_names:
-            self.metrics[name](*args)
+            self.additional_metrics[name](*args)
 
-    def finish(self):            
+    def finish(self):      
+        """Close the progress bar."""      
         if self.pbar.leave:
             # Fixes a bug where the HTML output does not survive after closing notebook
             print(self.pbar)

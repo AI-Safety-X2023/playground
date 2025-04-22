@@ -31,9 +31,19 @@ class Stddev(Aggregator):
 
 
 class Krum(Aggregator):
-    """multi-KRUM."""
+    """multi-KRUM as in Blanchard et al [1].
+    
+    [1] : https://arxiv.org/pdf/1703.02757
+    """
 
     def __init__(self, num_byzantine: int, num_selected: int = 1):
+        """Initialize multi-KRUM.
+
+        Args:
+            num_byzantine (int): the number `f` of byzantine workers.
+            num_selected (int, optional): the number `m` of selected gradients.
+                Defaults to 1, which corresponds to the base Krum function.
+        """
         super().__init__()
         assert num_byzantine >= 0 and num_selected >= 1
         self.num_byzantine = num_byzantine
@@ -50,7 +60,12 @@ class Krum(Aggregator):
             alpha (float): the maximum proportion of poisons to defend against.
 
         Returns:
-            aggregator (Krum): a robust aggregator.
+            aggregator (Krum): an m-Krum aggregator where `m = n - (2f + 3)`,
+                `n` is the number of workers and `f` is the number of byzantine workers,
+                computed from `alpha` and `batch_size`.
+        
+        :note: `m = n - (2f + 3)` is the maximum value which gives theoretical Byzantine
+        resilience guarantees.
         """
         alpha = 0.1
         f = int(alpha / (1 - alpha) * batch_size)
@@ -59,6 +74,15 @@ class Krum(Aggregator):
         return Krum(f, m)
     
     def weights(self, matrix: Tensor) -> Tensor:
+        """Computes the one-hot column weights for gradient aggregation.
+
+        Parameters:
+            matrix (Tensor): the per-sample gradients.
+
+        Returns:
+            weights (Tensor): the one-hot weights indicating the selected gradients
+                by Krum.
+        """
         assert matrix.shape[0] >= self.num_byzantine + 3
         assert matrix.shape[0] >= self.num_selected
 
@@ -74,8 +98,16 @@ class Krum(Aggregator):
 
         return weights
     
-    def forward(self, matrix: Tensor) -> Tensor:
-        return self.weights(matrix) @ matrix
+    def forward(self, matrix: Tensor, weights: Tensor = None) -> Tensor:
+        """Aggregates the input matrix.
+
+        Parameters:
+            matrix (Tensor): the per-sample gradients.
+            weights (Tensor, optional): precomputed weights. Defaults to None.
+        """
+        if weights is None:
+            weights = self.weights(matrix)
+        return weights @ matrix
     
     def __repr__(self):
         return f"Krum(num_byzantine={self.num_byzantine}, num_selected={self.num_selected})"

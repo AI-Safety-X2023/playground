@@ -9,11 +9,12 @@ from torch.nn.modules.loss import _Loss
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.data import Dataset, DataLoader
+from torchmetrics import CatMetric
 from torchmetrics.functional import total_variation
 
 import federated as fed
 
-from .nn import _detect_device
+from .nn import _detect_device, MetricLogger
 from .utils import trange
 from .datasets import EagerDataset
 
@@ -427,7 +428,6 @@ class GradientInverter:
             if isinstance(aggregator, fed.Krum):
                 selection = aggregator.weights(jac_matrix)
                 num_selected = selection[clean_batch_size:].sum()
-                # TODO
             elif isinstance(aggregator, fed.Mean):
                 raise NotImplementedError(
                     "We do not implement LIE against non-robust gradient aggregation "
@@ -481,6 +481,7 @@ class GradientInverter:
             model: nn.Module,
             criterion: _Loss = None,
             settings: LearningSettings = None,
+            logger: MetricLogger = None,
         ) -> tuple[Tensor, Tensor]:
         """Create a poisoned data point with an inverting gradient attack.
         
@@ -496,6 +497,8 @@ class GradientInverter:
                 with :param:`settings`
             settings (LearningSettings, optional): the learning settings and threat model.
                 Required for *Little Is Enough*.
+            logger (MetricLogger, optional): if specified, log the per-inversion step
+                auxiliary losses used for gradient inversion.
         
         Returns:
             x_y (tuple): the crafted poison to be used by all malicious workers.
@@ -552,6 +555,7 @@ class GradientInverter:
         lr_sched = LinearLR(opt, start_factor=0.5, total_iters=4)
         # ...and occasionally on the label.
 
+        loss_atks = torch.zeros(self.steps)
         for step in range(self.steps):
             x_p.requires_grad_(True)
             y_p.requires_grad_(True)
@@ -561,6 +565,8 @@ class GradientInverter:
                 x_p, y_p, target_grad,
                 model, criterion, differentiable=True,
             )
+            loss_atks[step] = loss_atk.item()
+
             # TODO: log `loss_atk`
             # Clear `loss` gradients on `x_p`
             opt.zero_grad()
@@ -597,14 +603,83 @@ class GradientInverter:
                 # Change the class if it improves the adversary's objective
                 if loss_atk_3 < loss_atk_2:
                     y_p = y_candidate
+                    loss_atks[step] = loss_atk_3.item()
         
             y_p.requires_grad_(False)
             y_p.grad = None
             model.zero_grad()
 
+        if logger is not None:
+            # Inject metric in logger.
+            # FIXME: this is not a robust solution
+            if 'loss_atk' not in logger.additional_metrics:
+                logger.additional_metrics['loss_atk'] = CatMetric()
+            logger.compute_additional_metrics(['loss_atk'], loss_atks.unsqueeze())
         y_p = y_p.argmax()
         return x_p, y_p
-    
+
+    def compute_num_selected(
+            self,
+            x_p: Tensor, y_p: Tensor,
+            model: nn.Module,
+            settings: LearningSettings,
+        ) -> int:
+        """Compute the number of selected gradients by the aggregator.
+
+        Parameters:
+            x_p (Tensor): the poisoned input.
+            y_p (Tensor): the poisoned target.
+            model (Module): the victim model.
+            settings (LearningSettings): the learning settings, assuming the robust
+                aggregator is `Krum`.
+
+        Returns:
+            num_selected (int): the number of selected gradients.
+        """
+        criterion = settings.criterion
+        aggregator = settings.aggregator
+        clean_batch_size = settings.num_clean
+        num_harmful = settings.num_byzantine
+
+        # Get the per-sample clean gradients
+        if isinstance(self.estimator, OmniscientGradientEstimator):
+            # The true per-sample gradients are already stored in model parameters .jac field
+            assert all(
+                clean_batch_size == param.grad.shape[0]
+                for param in model.parameters()
+            )
+            jacs = [param.jac for param in model.parameters()]
+        elif isinstance(self.estimator, ShadowGradientEstimator):
+            X, y = next(self.estimator.aux_loader_iter)
+            # Compute some shadow per-sample gradients
+            jacs = list(fed.per_sample_grads(model, X, y, criterion).values())
+            assert clean_batch_size == len(X)
+
+        jac_matrix = fed.combine_jacobians(jacs)
+
+        # Compute the poisoned gradient
+        y_pred = model(x_p.unsqueeze(0)).squeeze()
+        loss = criterion(y_pred, y_p)
+        loss.backward()
+        harmful_grad = combined_model_gradients(model)
+        model.zero_grad()
+
+        # Expand Jacobian matrix with the harmful gradients
+        jac_matrix = torch.cat((jac_matrix, torch.zeros(num_harmful, jac_matrix.shape[1])))
+        # Update the poisoned gradients in the Jacobian matrix
+        jac_matrix[clean_batch_size:] = harmful_grad.expand(num_harmful, -1)
+
+        # Compute the number of gradients selected by the aggregator
+        if isinstance(aggregator, fed.Krum):
+            selection = aggregator.weights(jac_matrix)
+            return int(selection[clean_batch_size:].sum())
+        else:
+            raise TypeError(
+                f"Can't compute selection rate for aggregator "
+                f"{aggregator.__class__.__name__}"
+            )
+
+
     def __repr__(self):
         return (
             f"GradientInverter("
