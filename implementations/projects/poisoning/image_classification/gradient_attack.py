@@ -69,6 +69,10 @@ class GradientEstimator(ABC):
         Estimate the gradient per-coordinate standard deviation on a clean-distributed dataset.
         """
     
+    def reset(self):
+        """Reset the estimator's state."""
+        pass
+    
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
 
@@ -120,10 +124,22 @@ class ShadowGradientEstimator(GradientEstimator):
     """
     Estimate the average clean gradient with an auxiliary dataset
     that is similarly distributed to the training dataset.
+
+    This estimator works by computing an exponential moving average
+    of the computed gradients. This refines the estimation towards the true mean
+    and takes the model updates into account.
     """
-    def __init__(self, aux_loader: DataLoader):
+    def __init__(self, aux_loader: DataLoader, momentum: float = 0.9):
+        """Initialize the estimator.
+
+        Args:
+            aux_loader (DataLoader): the auxiliary data used for gradient estimation.
+            momentum (float, optional): the gradient estimation momentum. Defaults to 0.9.
+        """
         self._data_len = len(aux_loader.dataset)
         self.aux_loader_iter = iter(cycle(aux_loader))
+        self.momentum = momentum
+        self._acc_grad: Tensor = None
     
     # NOTE: Assumes that `criterion.reduction == 'mean'`
     def average_clean_gradient(self, model: nn.Module, criterion: _Loss) -> Tensor:
@@ -136,11 +152,17 @@ class ShadowGradientEstimator(GradientEstimator):
 
         loss = criterion(model(X), y)
         loss.backward()
-        return combined_model_gradients(model)
+        grad = combined_model_gradients(model)
 
-        # minor suggestion (optimization): identify samples that are consistently
-        # close to the average and boost them.
-        # also cache near-constant gradients if model is converging
+        if self._acc_grad is not None:
+            m = self.momentum
+            # Compute the exponential moving averaged gradient
+            ema_grad = m * self._acc_grad + (1 - m) * grad
+        else:
+            ema_grad = grad
+
+        self._acc_grad = ema_grad.detach_().clone()
+        return ema_grad
     
     def std_clean_gradient(self, model: nn.Module, criterion: _Loss):
         model = deepcopy(model)
@@ -149,6 +171,9 @@ class ShadowGradientEstimator(GradientEstimator):
         std = OmniscientGradientEstimator().std_clean_gradient(model, criterion)
         fed.set_jacs_to_none(model)
         return std
+
+    def reset(self):
+        self._acc_grad = None
 
     def __repr__(self):
         return (
@@ -305,6 +330,12 @@ class GradientInverter:
         self.lr = lr
         self.sample_init = sample_init
         self.label_update_schedule = deepcopy(label_update_schedule)
+
+        self.history = []
+    
+    def reset_history(self):
+        self.history = []
+        self.estimator.reset()
     
     def gradient_objective(
             self,
@@ -546,6 +577,13 @@ class GradientInverter:
             x_p.requires_grad_(False)
             # Projected optimization algorithm
             training_data.clip_to_data_range(x_p, inplace=True)
+
+            loss_atk_2 = self.poison_objective(
+                x_p, y_p, target_grad,
+                model, criterion,
+            )
+            if loss_atk_2 > loss_atk:
+                break
             
             # --II---
             if self.label_update_schedule(step):
@@ -553,12 +591,12 @@ class GradientInverter:
                 # we guess the best class based on `loss_atk` gradients w.r.t y
                 # Efficiency is key when the number of classes grows
                 y_candidate = F.one_hot(y_p.grad.argmin(), num_classes).float()
-                loss_atk_2 = self.poison_objective(
+                loss_atk_3 = self.poison_objective(
                     x_p, y_candidate, target_grad,
                     model, criterion,
                 )
                 # Change the class if it improves the adversary's objective
-                if loss_atk_2 < loss_atk:
+                if loss_atk_3 < loss_atk_2:
                     y_p = y_candidate
         
             y_p.requires_grad_(False)

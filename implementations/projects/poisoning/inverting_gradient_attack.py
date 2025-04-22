@@ -193,6 +193,7 @@ class Pipeline:
         f = self.settings.num_byzantine
 
         model.train()
+        inverter.reset_history()
         logger = MetricLogger(
             metric,
             device=BEST_DEVICE,
@@ -297,7 +298,7 @@ class Pipeline:
             logs (Logs): training logs.
         """
         print("Poisoning", self._fmt_poisoning(inverter))
-
+        inverter.reset_history()
         train_loader, val_loader = self.make_dataloaders()
         metric = self.make_metrics()
         poison_set = UpdatableDataset()
