@@ -561,8 +561,7 @@ class GradientInverter:
                 x_p, y_p, target_grad,
                 model, criterion, differentiable=True,
             )
-            # TODO: log stats
-            print(f"Inverting gradient step {step}: loss_atk = {loss_atk.item()}")
+            # TODO: log `loss_atk`
             # Clear `loss` gradients on `x_p`
             opt.zero_grad()
 
