@@ -42,11 +42,13 @@ class MetricLogger:
         """
         # training metrics
         self.metrics = {
-            metric._get_name(): metric.to(device)
+            # Deepcopy the metrics at each logger creation (i.e at each epoch)
+            # to reset metric history
+            metric._get_name(): deepcopy(metric).to(device)
             for metric in metrics if metric is not None
         }
         # additional metrics
-        self.additional_metrics = additional_metrics
+        self.additional_metrics = deepcopy(additional_metrics)
         # average loss (special)
         self.avg_loss = MeanMetric().to(device)
 
