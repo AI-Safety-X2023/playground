@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from warnings import deprecated
 
 import torch
 from torch import nn, Tensor
