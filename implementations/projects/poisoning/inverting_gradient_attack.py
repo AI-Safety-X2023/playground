@@ -9,7 +9,7 @@ from torch import nn, Tensor
 from torch.nn.modules.loss import _Loss, CrossEntropyLoss
 from torch.optim import Optimizer, SGD, Adam
 from torch.utils.data import Dataset, DataLoader, TensorDataset
-from torchmetrics import Metric, MetricCollection, MetricTracker
+from torchmetrics import CatMetric, Metric, MetricCollection, MetricTracker
 from torchmetrics.classification import MulticlassAccuracy
 
 import federated as fed
@@ -198,6 +198,7 @@ class Pipeline:
             metric,
             device=BEST_DEVICE,
             desc='Train loop', total=len(train_loader.dataset), keep_pbars=keep_pbars,
+            num_selected_poisons=CatMetric(),
         )
         poison_set = UpdatableDataset()
 
@@ -236,6 +237,15 @@ class Pipeline:
                     model, X_p_, y_p_, criterion,
                     store_in_params=True, append=True,
                 )
+
+                # Log poison selection rate
+                poison_indices = np.arange(len(X), len(X) + f)
+                num_selected_poisons = aggregator.num_selected_among(poison_indices, model)
+                logger.compute_additional_metrics(
+                    'num_selected_poisons',
+                    num_selected_poisons,
+                )
+
                 fed.aggregate_and_store_grads(model, aggregator)
                 loss = criterion(model(X), y) + criterion(model(X_p_), y_p_)
             

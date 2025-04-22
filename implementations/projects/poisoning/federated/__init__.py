@@ -50,26 +50,27 @@ class Krum(Aggregator):
         self.num_selected = num_selected
     
     @classmethod
-    def with_learning_settings(cls, batch_size: int, alpha: float) -> "Krum":
+    def with_learning_settings(cls, num_clean: int, tol: float) -> "Krum":
         """Configure multi-KRUM in byzantine machine learning.
 
         Parameters:
-            batch_size (int): the clean data batch size.
+            num_clean (int): the clean data batch size.
                 **Warning** : this is not the true batch size since it does not
                 include poisons, the latter are artificially inserted into the batch.
-            alpha (float): the maximum proportion of poisons to defend against.
+            tol (float): the poison tolerance, which is the maximum proportion
+                of poisons to defend against.
 
         Returns:
             aggregator (Krum): an m-Krum aggregator where `m = n - (2f + 3)`,
                 `n` is the number of workers and `f` is the number of byzantine workers,
-                computed from `alpha` and `batch_size`.
+                computed from `tol` and `num_clean`.
         
         :note: `m = n - (2f + 3)` is the maximum value which gives theoretical Byzantine
         resilience guarantees.
         """
-        alpha = 0.1
-        f = int(alpha / (1 - alpha) * batch_size)
-        n = batch_size + f
+        tol = 0.1
+        f = int(tol / (1 - tol) * num_clean)
+        n = num_clean + f
         m = n - (2 * f + 3)
         return Krum(f, m)
     
@@ -108,6 +109,27 @@ class Krum(Aggregator):
         if weights is None:
             weights = self.weights(matrix)
         return weights @ matrix
+    
+    def num_selected_among(self, indices: list[int], model: nn.Module) -> int:
+        """Compute the number of selected gradients among a list.
+
+        Parameters:
+            indices (list of int): the list of indices of gradients to be checked.
+            model (nn.Module): a neural network with per-sample gradients already
+                precomputed in the `.jac` parameter fields.
+        
+        Example:
+        ```python
+        per_sample_grads(model, x_p, y_p, criterion, store_in_params=True)
+        num_selected = aggregator.num_selected_among(indices, model)
+        ```
+        """
+        jacs = [param.jac for param in model.parameters()]
+        matrix = combine_jacobians(jacs)
+        weights = self.weights(matrix)
+        assert all(w in (0.0, 1.0) for w in weights)
+        return sum(weights[i] > 0.0 for i in indices)
+        
     
     def __repr__(self):
         return f"Krum(num_byzantine={self.num_byzantine}, num_selected={self.num_selected})"
