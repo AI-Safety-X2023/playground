@@ -14,7 +14,6 @@ from torchmetrics.functional import total_variation
 
 import federated as fed
 
-from .accel import BEST_DEVICE
 from .nn import _detect_device, MetricLogger
 from .utils import trange
 from .datasets import EagerDataset
@@ -407,7 +406,7 @@ class GradientInverter:
             self,
             settings: LearningSettings,
             jac_matrix: Tensor, agg_grad: Tensor, std_grad: Tensor,
-            z_init = 1.0, threshold = 0.1, # TODO: adjust and justify these values
+            z_init: float = None, threshold: float = None,
         ) -> Tensor:
         """Find the best factor to deviate the (estimated) average gradient
         for Little Is Enough attack. This is the gradient attack specified in Algorithm 1
@@ -422,39 +421,74 @@ class GradientInverter:
         clean_batch_size = settings.num_clean
         num_harmful = settings.num_byzantine
 
-        # Expand Jacobian matrix with the harmful gradients
-        jac_matrix = torch.cat((
-            jac_matrix,
-            torch.zeros(num_harmful, jac_matrix.shape[1], device=jac_matrix.device)
-        ))
+        jac_matrix.requires_grad_(False)
+        if z_init == None:
+            from torch.linalg import norm
+            grad_norms = norm(jac_matrix, dim=1)
+            assert grad_norms.shape == (jac_matrix.shape[0],)
+            std_grad_norm = norm(std_grad).item()
+            min_norm = grad_norms.min().item()
+            max_norm = grad_norms.max().item()
+            z_init = max_norm / std_grad_norm
+            # In general, `min_norm ~ max_norm ~ std_grad_norm` so we have
+            # `z_init ~ 1` and `threshold ~ 1 / 16`.
+            # This means we do not perform more than 5 steps
+            threshold = min_norm / (16.0 * std_grad_norm)
 
-        # TODO: Algorithm 1 in
-        # https://www.semanticscholar.org/paper/be10a3afb028e971f38fa80347e4bd826724b86a
+        agr_agnostic = not isinstance(aggregator, fed.Krum)
+        if agr_agnostic:
+            # We use the Min-Sum AGR-agnostic attack as in the paper
+            # TODO: compute an approximation of cdist by projecting all gradients
+            # on a random subset of the coordinates. Would this miss some large values???
+            dist_matrix = torch.cdist(
+                jac_matrix, jac_matrix,
+                compute_mode="donot_use_mm_for_euclid_dist",
+            )
+            max_d2_sum = (dist_matrix**2).sum(dim=0).max().item()
+        else:
+            # Expand Jacobian matrix with the harmful gradients
+            jac_matrix = torch.cat((
+                jac_matrix,
+                torch.zeros(num_harmful, jac_matrix.shape[1], device=jac_matrix.device)
+            ))
+
         z = z_init
         z_succ = float('inf')
+        accepted = False
         step = z_init / 2
         while abs(z_succ - z) > threshold:
-            if step / 2 < threshold:
-                #print(f"Poison was never selected even under {threshold}")
+            if not accepted and step / 2 < threshold:
+                # Sometimes (but rarely), all of the gradients are very close to the mean,
+                # so we just break the loop and fail
+                # FIXME: is this mathematically possible with Min-Sum vs. Mean aggregation?
+                # since mean gradient minimizes sum of squared distances
                 return z
 
-            # Update the poisoned gradients in the Jacobian matrix
-            poisoned_grads = (agg_grad - z * std_grad).unsqueeze(0).expand(num_harmful, -1)
-            jac_matrix[clean_batch_size:] = poisoned_grads
+            poisoned_grad = agg_grad - z * std_grad
 
-            # Compute the number of gradients selected by the aggregator
             if isinstance(aggregator, fed.Krum):
+                # FIXME: this LIE attack against Krum never gets poisons selected...
+
+                # Update the poisoned gradients in the Jacobian matrix
+                poisoned_grads = poisoned_grad.unsqueeze(0).expand(num_harmful, -1)
+                jac_matrix[clean_batch_size:] = poisoned_grads
+
                 selection = aggregator.weights(jac_matrix)
+                # Compute the number of gradients selected by the aggregator
                 num_selected = selection[clean_batch_size:].sum()
-            elif isinstance(aggregator, fed.Mean):
-                raise NotImplementedError(
-                    "We do not implement LIE against non-robust gradient aggregation "
-                    "since the LIE optimization problem is unbounded for `Mean`."
-                )
+                accepted = (num_selected >= 1)
             else:
-                raise RuntimeError(f"Unknown aggregator: {aggregator.__class__}")
+                # We run the Min-Sum AGR-agnostic attack
+                assert agr_agnostic
+                dist_matrix = torch.cdist(
+                    jac_matrix, poisoned_grad.unsqueeze(0),
+                    compute_mode="donot_use_mm_for_euclid_dist",
+                )
+                assert dist_matrix.shape == (jac_matrix.shape[0], 1)
+                d2_sum = (dist_matrix**2).sum(dim=0).item()
+                accepted = (d2_sum <= max_d2_sum)
             
-            if num_selected >= 1 :
+            if accepted:
                 z_succ = z
                 z = z + step
             else:
@@ -494,7 +528,7 @@ class GradientInverter:
         std_grad = fed.Stddev()(jac_matrix).requires_grad_(False)
 
         z = self._lie_find_std_factor(settings, jac_matrix, agg_grad, std_grad)
-        
+
         # Calculate the final gradient of the attack (LIE)
         return agg_grad + z * std_grad
     
@@ -637,6 +671,7 @@ class GradientInverter:
             if 'loss_atk' not in logger.additional_metrics:
                 logger.additional_metrics['loss_atk'] = CatMetric()
             logger.compute_additional_metrics(['loss_atk'], loss_atks.unsqueeze())
+        
         y_p = y_p.argmax()
         return x_p, y_p
 

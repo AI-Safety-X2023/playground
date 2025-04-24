@@ -226,8 +226,6 @@ class Pipeline:
                 # This adds to `loss` model gradients due to gradient accumulation
                 loss_p.backward()
                 # ---
-                optimizer.step()
-                optimizer.zero_grad()
 
                 loss = loss_c + loss_p
             
