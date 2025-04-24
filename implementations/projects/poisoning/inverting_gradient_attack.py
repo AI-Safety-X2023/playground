@@ -108,6 +108,7 @@ class Pipeline:
             settings: LearningSettings,
             train_loader: DataLoader,
             val_loader: DataLoader = None,
+            opt_cls: type[Optimizer] = Adam,
             hparams: Hyperparams = Hyperparams(),
         ):
         assert train_loader.batch_size == hparams.batch_size
@@ -115,6 +116,7 @@ class Pipeline:
         self.settings = settings
         self.train_loader = train_loader
         self.val_loader = val_loader
+        self.opt_cls = opt_cls
         self.hparams = hparams
 
         lr = self.hparams.lr
@@ -137,17 +139,21 @@ class Pipeline:
         # TODO: clone?
         return (self.train_loader, self.val_loader)
 
-    def make_optimizer(self, model: nn.Module, opt_cls = Adam, lr: float = None) -> Optimizer:
+    def make_optimizer(self, model: nn.Module, opt_cls = None, lr: float = None) -> Optimizer:
         """Create the optimizer with the pipeline training hyperparameters.
 
         Args:
             model (Module): the neural network.
-            opt_cls (Optimizer type): the optimizer class. Defaults to Adam.
-            lr (float, optional): learning rate. Defaults to None.
+            opt_cls (Optimizer type, optional): the optimizer class. Defaults to
+                the pipeline's configured optimizer.
+            lr (float, optional): learning rate. Defaults to the specified value in
+                the pipeline hyperparameters.
 
         Returns:
             Optimizer: the optimizer.
         """
+        if opt_cls == None:
+            opt_cls = self.opt_cls
         if lr is None:
             lr = self.hparams.lr
         return opt_cls(
