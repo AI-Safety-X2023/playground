@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from warnings import warn
 from enum import IntEnum
 import dataclasses
 from dataclasses import dataclass
@@ -41,13 +42,96 @@ class LRSchedulerParams:
 @dataclass
 class Hyperparams:
     lr: float = 1e-3
-    weight_decay: float = 5e-4
+    momentum: float = 0.9
+    weight_decay: float = 1e-5
     max_lr: float = 0.1 # for learning rate scheduling
     batch_size: int = BATCH_SIZE
     epochs: int = 6
     num_classes: int = NUM_CLASSES
     top_k: int = {10: 1, 100: 5}[NUM_CLASSES]
     criterion: _Loss = dataclasses.field(default_factory=CrossEntropyLoss)
+
+    @classmethod
+    def presets(
+        cls,
+        opt_cls: type[Optimizer],
+        model_cls: type[nn.Module] = None,
+    ) -> Hyperparams | None:
+        """Returns the best hyperparameters for a given optimizer.
+
+        Args:
+            opt_cls (type[Optimizer]): the optimizer class.
+            model_cls (type[Module], optional): the optimized model class.
+                Defaults to ResNet-18.
+
+        Returns:
+            hparams (Hyperparams): a good preset of hyperparameters for the optimizer
+                and the model.
+        """
+        is_none = model_cls is None
+        if not is_none:
+            model_name = model_cls.__name__.lower()
+            is_resnet = model_name.startswith('resnet')
+            is_shufflenet = model_name.startswith('shufflenet')
+
+        # TODO: different for ShuffleNetV2
+        if issubclass(opt_cls, SGD):
+            if is_none:
+                return Hyperparams(
+                    lr=1e-2,
+                    epochs=5,
+                    weight_decay=1e-5,
+                    momentum=0.9,
+                )
+            elif is_resnet:
+                # Best for ResNet-18
+                return Hyperparams(
+                    lr=1e-3, # 1e-2
+                    epochs=5,
+                    weight_decay=1e-5,
+                    momentum=0.9, # 0
+                )
+            elif is_shufflenet:
+                # Best for ShuffleNetV2
+                return Hyperparams(
+                    lr=1e-2, # 2e-2
+                    epochs=4, # 7
+                    weight_decay=1e-5,
+                    momentum=0.9, # 0
+                )
+        elif issubclass(opt_cls, Adam):
+            if is_none:
+                return Hyperparams(
+                    lr=1e-3,
+                    epochs=5,
+                    weight_decay=1e-5,
+                )
+            if is_resnet:
+                # Best for ResNet-18
+                return Hyperparams(
+                    lr=5e-4, # 2e-4
+                    epochs=6, # 3
+                    weight_decay=1e-5,
+                )
+            elif is_shufflenet:
+                # Best for ShuffleNetV2
+                return Hyperparams(
+                    lr=2e-3, 
+                    epochs=6, 
+                    weight_decay=1e-5,
+                )
+        
+        if not (is_resnet or is_shufflenet):
+            warn(
+                f"Warning: unknown model {model_name}, "
+                "using default hyperparameters."
+            )
+        else:
+            warn(
+                f"Warning: unknown optimizer {opt_cls.__name__}, "
+                "using default hyperparameters."
+            )
+        return Hyperparams()
 
 
 class Unlearning(IntEnum):
@@ -59,6 +143,16 @@ class Unlearning(IntEnum):
     EUK = 5
     SCRUB = 6
 
+    def __str__(self):
+        return {
+            Unlearning.GRADIENT_DESCENT: "GD",
+            Unlearning.GRADIENT_ASCENT: "GA",
+            Unlearning.NOISY_GRADIENT_DESCENT: "NGD",
+            Unlearning.NEG_GRAD_PLUS: "NegGrad+",
+            Unlearning.CFK: "CFk",
+            Unlearning.EUK: "EUk",
+            Unlearning.SCRUB: "SCRUB",
+        }[self]
 
 class Pipeline:
     """An inverting gradient attack and machine unlearning pipeline.
@@ -94,7 +188,7 @@ class Pipeline:
     ```python
     model = ResNet18()
     settings = LearningSettings(criterion, aggregator=Krum(...), ...)
-    hparams = Hyperparams()
+    hparams = Hyperparams.optimizer_presets(Adam, type(model))
     estimator = ShadowGradientEstimator(aux_loader)
     sample_init = SampleInitRandomNoise()
     inverter = GradientInverter(method, estimator, steps, sample_init)
@@ -109,7 +203,7 @@ class Pipeline:
             train_loader: DataLoader,
             val_loader: DataLoader = None,
             opt_cls: type[Optimizer] = Adam,
-            hparams: Hyperparams = Hyperparams(),
+            hparams: Hyperparams = None,
         ):
         assert train_loader.batch_size == hparams.batch_size
 
@@ -117,6 +211,9 @@ class Pipeline:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.opt_cls = opt_cls
+
+        if hparams is None:
+            hparams = Hyperparams.presets(opt_cls)
         self.hparams = hparams
 
         lr = self.hparams.lr
@@ -156,11 +253,19 @@ class Pipeline:
             opt_cls = self.opt_cls
         if lr is None:
             lr = self.hparams.lr
-        return opt_cls(
-            model.parameters(),
-            lr=lr,
-            weight_decay=self.hparams.weight_decay,
-        )
+        if issubclass(opt_cls, SGD):
+            return opt_cls(
+                model.parameters(),
+                lr=lr,
+                momentum=self.hparams.momentum,
+                weight_decay=self.hparams.weight_decay,
+            )
+        else:
+            return opt_cls(
+                model.parameters(),
+                lr=lr,
+                weight_decay=self.hparams.weight_decay,
+            )
 
     def make_metrics(self) -> MetricTracker:
         """Track multiple metrics over time.
@@ -401,15 +506,16 @@ class Pipeline:
                     keep_pbars=False, metric=metric,
                 )
             case Unlearning.EUK:
-                opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
+                opt = self.make_optimizer(unlearner, opt_cls=Adam, lr=lr)
                 with unlearning_last_layers(unlearner, k, 'euk'):
                     logs = train_val_loop(
                         unlearner, train_loader, val_loader,
                         criterion, opt, epochs=epochs,
                         keep_pbars=False, metric=metric,
+                        early_stopping=False,
                     )
             case Unlearning.SCRUB:
-                opt = self.make_optimizer(unlearner, opt_name='adam', lr=lr)
+                opt = self.make_optimizer(unlearner, opt_cls=Adam, lr=lr)
                 logs = scrub(
                     model, unlearner, train_loader, forget_loader, criterion, opt,
                     val_loader=val_loader,
