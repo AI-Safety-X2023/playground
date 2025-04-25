@@ -194,7 +194,7 @@ class ShadowGradientEstimator(GradientEstimator):
         )
     
 class SampleInit(ABC):
-    """Sample initialization method for inverting gradient attacks."""
+    """Poison sample initialization method for inverting gradient attacks."""
     def __init__(self, dataset: Dataset):
         self.dataset = dataset
 
@@ -211,12 +211,47 @@ class SampleInitRandomNoise(SampleInit):
     def __call__(self) -> tuple[Tensor, Tensor]:
         return self.dataset.random_sample_noise()
 
+class SampleInitFeedback(SampleInit):
+    """Improve the poison iteratively with random restarts.
+
+    If the model updates are small, the target gradients change little so
+    a suitable poison may be used a few times in a row.
+
+    The stored poison is reset with random noise every some steps to avoid
+    overfitting on similar samples (so the gradients would be too small).
+    
+    ## Example
+
+    ```python
+    sample_init = SampleInitFeedback(dataset, restart_period=5)
+    X_p, y_p = sample_init()
+    # Improve poisons X_p and y_p with gradient inversion steps...
+    sample_init.feedback(X_p, y_p)
+    ```
+    """
+    def __init__(self, dataset: Dataset, restart_period: int = 5):
+        """Initialize with random noise for the poison."""
+        self.dataset = dataset
+        self.X, self.y = self.dataset.random_sample_noise()
+        self._step = 0
+        self.restart_period = restart_period
+    
+    def __call__(self) -> tuple[Tensor, Tensor]:
+        self._step += 1
+        if self._step % self.restart_period == 0:
+            self.X, self.y = self.dataset.random_sample_noise()
+        
+        return self.X, self.y
+    
+    def feedback(self, X: Tensor, y: Tensor):
+        # TODO: implement random restarts and validate if attack objective improves
+        self.X = X.detach()
+        self.y = y.detach()     
 
 class SampleInitFromDataset(SampleInit):
     """Choose a random image from the dataset."""
     def __call__(self) -> tuple[Tensor, Tensor]:
         return self.dataset[randint(len(self.dataset))]
-
 
 class SampleInitConstant(SampleInit):
     """Return a fixed starting image."""
@@ -520,7 +555,11 @@ class GradientInverter:
             X, y = X.to(device), y.to(device)
             # Compute some shadow per-sample gradients
             jacs = list(fed.per_sample_grads(model, X, y, settings.criterion).values())
-            assert clean_batch_size == len(X)
+            if isinstance(settings.aggregator, fed.Krum):
+                assert clean_batch_size == len(X), (
+                    "Auxiliary dataset batch size must be equal to clean batch size "
+                    "so the Krum parameters remain consistent when performing the LIE attack"
+                )
 
         jac_matrix = fed.combine_jacobians(jacs)
 
@@ -673,6 +712,11 @@ class GradientInverter:
             logger.compute_additional_metrics(['loss_atk'], loss_atks.unsqueeze())
         
         y_p = y_p.argmax()
+
+        if isinstance(self.sample_init, SampleInitFeedback):
+            # Backup this improved poison for future attack steps
+            self.sample_init.feedback(x_p, y_p)
+
         return x_p, y_p
 
     def __repr__(self):
