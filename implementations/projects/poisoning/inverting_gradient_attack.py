@@ -323,7 +323,7 @@ class Pipeline:
                 loss_c.backward()
 
                 # --- poisoning attack
-                X_p, y_p = inverter.attack(model, criterion, self.settings)
+                X_p, y_p = inverter.attack(model, criterion, self.settings, logger)
                 # Unsqueeze since model and criterion expect batch
                 X_p_, y_p_ = X_p.unsqueeze(0), y_p.unsqueeze(0)
                 logits_p = model(X_p_)
@@ -337,7 +337,7 @@ class Pipeline:
             elif isinstance(aggregator, Krum):
                 fed.per_sample_grads(model, X, y, criterion, store_in_params=True)
 
-                X_p, y_p = inverter.attack(model, criterion, self.settings)
+                X_p, y_p = inverter.attack(model, criterion, self.settings, logger)
                 # Repeat poisons at identical for each byzantine data supplier
                 X_p_ = X_p.repeat(f, *([1] * X_p.ndim))
                 y_p_ = y_p.repeat(f, *([1] * y_p.ndim))

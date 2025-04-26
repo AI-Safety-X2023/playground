@@ -257,6 +257,7 @@ class SampleInitFeedback(SampleInit):
         """Initialize with random noise for the poison."""
         self.dataset = dataset
         self.X, self.y = self.dataset.random_sample_noise()
+        self._loss_atk = float('inf')
         self._step = 0
         self.restart_period = restart_period
     
@@ -264,13 +265,15 @@ class SampleInitFeedback(SampleInit):
         self._step += 1
         if self._step % self.restart_period == 0:
             self.X, self.y = self.dataset.random_sample_noise()
+            self._loss_atk = float('inf')
         
         return self.X, self.y
     
-    def feedback(self, X: Tensor, y: Tensor):
-        # TODO: implement random restarts and validate if attack objective improves
-        self.X = X.detach()
-        self.y = y.detach()     
+    def feedback(self, X: Tensor, y: Tensor, loss_atk: float):
+        if loss_atk < self._loss_atk:
+            self.X = X.detach()
+            self.y = y.detach()
+            self._loss_atk = loss_atk
 
 class SampleInitFromDataset(SampleInit):
     """Choose a random image from the dataset."""
@@ -390,7 +393,7 @@ class GradientInverter:
             estimator: GradientEstimator,
             steps: int,
             sample_init: SampleInit,
-            tv_coef = 0.0, # TODO: more ergonomic interface
+            tv_coef = 0.0,
             lr = 0.3, # TODO: find appropriate lr scheduling step
             label_update_schedule: Schedule = PowerofTwoSchedule(),
         ):
@@ -410,36 +413,39 @@ class GradientInverter:
     
     def gradient_objective(
             self,
-            model_grad: Tensor,
+            grad_p: Tensor,
             target_grad: Tensor,
+            settings: LearningSettings,
             x_p: Tensor = None,
         ) -> Tensor:
         """Returns the adversary's objective to minimize."""
         # FIXME: not reliable
         training_data: EagerDataset = self.sample_init.dataset
         max_data_variation = training_data.max_data_variation()
+        alpha = settings.poison_factor
 
         match self.method:
             case GradientAttack.RECONSTRUCTION:
                 #TODO: compare cos_sim with distance squared
                 #TODO: (signed gradient updates) & learning rate decay (Geiping et al.)
-                loss_atk = 1.0 - torch.cosine_similarity(model_grad, target_grad, dim=0)
+                loss_atk = 1.0 - torch.cosine_similarity(grad_p, target_grad, dim=0)
 
             case GradientAttack.ASCENT:
-                # FIXME: this is incorrect : model grad is only poisoned grad,
-                # but want to compare aggregated clean + poison grads
-                cos_sim = torch.cosine_similarity(model_grad, target_grad, dim=0)
+                grad_a = target_grad
+                grad_a_p = (1. - alpha) * grad_a + alpha * grad_p
+                cos_sim = torch.cosine_similarity(grad_a_p, grad_a, dim=0)
                 # dot product increases the gradient size but makes unalignment easier
-                #loss_atk = g_p.dot(avg_clean_gradient)
-                loss_atk = cos_sim
+                loss_atk = grad_p.dot(target_grad) / target_grad.dot(target_grad)
+                loss_atk += cos_sim
             
             case GradientAttack.ORTHOGONAL:
-                # FIXME: Same as above
-                cos_sim = torch.cosine_similarity(model_grad, target_grad, dim=0)
+                grad_a = target_grad
+                grad_a_p = (1. - alpha) * grad_a + alpha * grad_p 
+                cos_sim = torch.cosine_similarity(grad_a_p, grad_a, dim=0)
                 loss_atk = cos_sim ** 2
 
             case GradientAttack.LITTLE_IS_ENOUGH:
-                loss_atk = (model_grad - target_grad).pow(2).sum() / target_grad.pow(2).sum()
+                loss_atk = (grad_p - target_grad).pow(2).sum() / target_grad.pow(2).sum()
 
         if self.tv_coef:
             assert x_p is not None
@@ -453,15 +459,17 @@ class GradientInverter:
             self,
             x_p: Tensor, y_p: Tensor, target_grad: Tensor,
             model: nn.Module, criterion: _Loss,
+            settings: LearningSettings,
             differentiable: bool = False,
         ):
         y_pred = model(x_p.unsqueeze(0)).squeeze()
         loss = criterion(y_pred, y_p)
         loss.backward(create_graph=differentiable)
-        model_grad = combined_model_gradients(model)
+        grad_p = combined_model_gradients(model)
         return self.gradient_objective(
-            model_grad,
+            grad_p,
             target_grad,
+            settings,
             x_p,
         )
     
@@ -509,7 +517,7 @@ class GradientInverter:
                 jac_matrix,
                 torch.zeros(num_harmful, jac_matrix.shape[1], device=jac_matrix.device)
             ))
-        
+
         z = z_init
         z_succ = float('inf')
         accepted = False
@@ -576,10 +584,15 @@ class GradientInverter:
         jac_matrix = self.estimator.per_sample_gradients(model, settings.criterion)
         self._check_jac_matrix_shape(jac_matrix, settings)
 
-        agg_grad = settings.aggregator(jac_matrix).requires_grad_(False)
-        std_grad = fed.Stddev()(jac_matrix).requires_grad_(False)
+        agg_grad: Tensor = settings.aggregator(jac_matrix).requires_grad_(False)
+        #std_grad = fed.Stddev()(jac_matrix).requires_grad_(False)
+        std_grad = agg_grad.sign()
 
         z = self._lie_find_std_factor(settings, jac_matrix, agg_grad, std_grad)
+        print(
+            f"{jac_matrix.norm(dim=1).mean():.3} {agg_grad.norm().mean():.3} "
+            f"{std_grad.norm().mean():.3} {z:.3}"
+        )
 
         # Calculate the final gradient of the attack (LIE)
         return agg_grad + z * std_grad
@@ -664,6 +677,7 @@ class GradientInverter:
         # ...and occasionally on the label.
 
         loss_atks = torch.zeros(self.steps)
+        best_x_p, best_y_p = x_p.detach(), y_p.detach()
         for step in range(self.steps):
             x_p.requires_grad_(True)
             y_p.requires_grad_(True)
@@ -671,11 +685,10 @@ class GradientInverter:
             # --I--
             loss_atk = self.poison_objective(
                 x_p, y_p, target_grad,
-                model, criterion, differentiable=True,
+                model, criterion, settings, differentiable=True,
             )
             loss_atks[step] = loss_atk.item()
 
-            # TODO: log `loss_atk`
             # Clear `loss` gradients on `x_p`
             opt.zero_grad()
 
@@ -693,9 +706,11 @@ class GradientInverter:
 
             loss_atk_2 = self.poison_objective(
                 x_p, y_p, target_grad,
-                model, criterion,
+                model, criterion, settings,
             )
             if loss_atk_2 > loss_atk:
+                # Take backup and go
+                x_p, y_p = best_x_p, best_y_p
                 break
             
             # --II---
@@ -706,13 +721,14 @@ class GradientInverter:
                 y_candidate = F.one_hot(y_p.grad.argmin(), num_classes).float()
                 loss_atk_3 = self.poison_objective(
                     x_p, y_candidate, target_grad,
-                    model, criterion,
+                    model, criterion, settings,
                 )
                 # Change the class if it improves the adversary's objective
                 if loss_atk_3 < loss_atk_2:
                     y_p = y_candidate
                     loss_atks[step] = loss_atk_3.item()
             
+            best_x_p, best_y_p = x_p.detach(), y_p.detach()
             y_p.requires_grad_(False)
             y_p.grad = None
             model.zero_grad()
@@ -722,13 +738,13 @@ class GradientInverter:
             # FIXME: this is not a robust solution
             if 'loss_atk' not in logger.additional_metrics:
                 logger.additional_metrics['loss_atk'] = CatMetric()
-            logger.compute_additional_metrics(['loss_atk'], loss_atks.unsqueeze())
+            logger.compute_additional_metrics(['loss_atk'], loss_atks.unsqueeze(0))
         
         y_p = y_p.argmax()
 
         if isinstance(self.sample_init, SampleInitFeedback):
             # Backup this improved poison for future attack steps
-            self.sample_init.feedback(x_p, y_p)
+            self.sample_init.feedback(x_p, y_p, loss_atk.item())
 
         return x_p, y_p
 
