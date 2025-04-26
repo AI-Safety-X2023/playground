@@ -225,7 +225,11 @@ class SampleInit(ABC):
     @abstractmethod
     def __call__(self) -> tuple[Tensor, Tensor]:
         """Returns the initial input and label."""
-    
+
+    def restart(self) -> tuple[Tensor, Tensor]:
+        """Reinitialize any state and return a fresh sample."""
+        return self()
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
 
@@ -264,16 +268,26 @@ class SampleInitFeedback(SampleInit):
     def __call__(self) -> tuple[Tensor, Tensor]:
         self._step += 1
         if self._step % self.restart_period == 0:
-            self.X, self.y = self.dataset.random_sample_noise()
-            self._loss_atk = float('inf')
+            self.restart()
         
         return self.X, self.y
     
-    def feedback(self, X: Tensor, y: Tensor, loss_atk: float):
-        if loss_atk < self._loss_atk:
+    def restart(self) -> tuple[Tensor, Tensor]:
+        self.X, self.y = self.dataset.random_sample_noise()
+        self._loss_atk = float('inf')
+        return self.X, self.y
+
+    def feedback(
+            self,
+            X: Tensor, y: Tensor,
+            loss_atk: float, max_acceptable_loss: float,
+        ):
+        if loss_atk < self._loss_atk and loss_atk < max_acceptable_loss:
             self.X = X.detach()
             self.y = y.detach()
             self._loss_atk = loss_atk
+        else:
+            self.restart()
 
 class SampleInitFromDataset(SampleInit):
     """Choose a random image from the dataset."""
@@ -677,7 +691,7 @@ class GradientInverter:
         # ...and occasionally on the label.
 
         loss_atks = torch.zeros(self.steps)
-        best_x_p, best_y_p = x_p.detach(), y_p.detach()
+        poisons = []
         for step in range(self.steps):
             x_p.requires_grad_(True)
             y_p.requires_grad_(True)
@@ -708,10 +722,6 @@ class GradientInverter:
                 x_p, y_p, target_grad,
                 model, criterion, settings,
             )
-            if loss_atk_2 > loss_atk:
-                # Take backup and go
-                x_p, y_p = best_x_p, best_y_p
-                break
             
             # --II---
             if self.label_update_schedule(step):
@@ -728,10 +738,14 @@ class GradientInverter:
                     y_p = y_candidate
                     loss_atks[step] = loss_atk_3.item()
             
-            best_x_p, best_y_p = x_p.detach(), y_p.detach()
+            poisons.append((x_p.detach().clone(), y_p.detach().clone()))
             y_p.requires_grad_(False)
             y_p.grad = None
             model.zero_grad()
+        
+        best_step = loss_atks.argmin().item()
+        x_p, y_p = poisons[best_step]
+        loss_atk = loss_atks[best_step]
 
         if logger is not None:
             # Inject metric in logger.
@@ -743,8 +757,14 @@ class GradientInverter:
         y_p = y_p.argmax()
 
         if isinstance(self.sample_init, SampleInitFeedback):
-            # Backup this improved poison for future attack steps
-            self.sample_init.feedback(x_p, y_p, loss_atk.item())
+            l = loss_atk.item()
+            m = {
+                GradientAttack.ASCENT: 0.0,
+                GradientAttack.ORTHOGONAL: 0.2,
+                GradientAttack.LITTLE_IS_ENOUGH: 1.0,
+            }[self.method]
+            # If it is good, backup this improved poison for future attack steps
+            self.sample_init.feedback(x_p, y_p, l, max_acceptable_loss=m)
 
         return x_p, y_p
 
