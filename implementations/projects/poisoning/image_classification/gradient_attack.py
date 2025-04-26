@@ -15,7 +15,7 @@ from torchmetrics.functional import total_variation
 import federated as fed
 
 from .nn import _detect_device, MetricLogger
-from .utils import trange
+from .utils import trange, mem_aware_pdist
 from .datasets import EagerDataset
 
 
@@ -62,6 +62,14 @@ def cycle(iterable: DataLoader):
 
 class GradientEstimator(ABC):
     """A class for estimating model gradient statistics (mean and standard deviation)."""
+
+    @abstractmethod
+    def per_sample_gradients(self, model: nn.Module, criterion: _Loss) -> Tensor:
+        """Compute per-sample gradients on a clean-distributed dataset.
+        
+        Returns:
+            matrix (Tensor): the jacobian matrix containing per-sample row gradients.
+        """
     
     @abstractmethod
     def average_clean_gradient(self, model: nn.Module, criterion: _Loss) -> Tensor:
@@ -106,6 +114,17 @@ class OmniscientGradientEstimator(GradientEstimator):
     std_clean_grad = estimator.std_clean_gradient(model, criterion)
     ```
     """
+
+    def per_sample_gradients(self, model: nn.Module, criterion: _Loss) -> Tensor:
+        try:
+            jacs = [param.jac for param in model.parameters()]
+        except AttributeError:
+            raise RuntimeError(
+                "You must call `per_sample_grads()` before gathering them "
+                "with an omniscient estimator"
+            )
+        assert all(jac.shape[0] == jacs[0].shape[0] for jac in jacs), "Inconsistent jacobian shapes"
+        return fed.combine_jacobians(jacs)
     
     # NOTE: Assumes that `criterion.reduction == 'mean'`
     def average_clean_gradient(self, model: nn.Module, criterion: _Loss) -> Tensor:
@@ -115,16 +134,13 @@ class OmniscientGradientEstimator(GradientEstimator):
 
         # Otherwise, aggregate jacobians
         aggregator = fed.Mean()
-        jacs = [param.jac for param in model.parameters()]
-        assert all(jac.shape[0] == jacs[0].shape[0] for jac in jacs)
-        matrix = fed.combine_jacobians(jacs)
+        matrix = self.per_sample_gradients(model, criterion)
         return aggregator(matrix)
 
     def std_clean_gradient(self, model: nn.Module, criterion: _Loss) -> Tensor:
         """Assumes jacobians have been stored with `federated.per_sample_grads`."""
         aggregator = fed.Stddev()
-        jacs = [param.jac for param in model.parameters()]
-        matrix = fed.combine_jacobians(jacs)
+        matrix = self.per_sample_gradients(model, criterion)
         return aggregator(matrix)
     
 
@@ -137,17 +153,31 @@ class ShadowGradientEstimator(GradientEstimator):
     of the computed gradients. This refines the estimation towards the true mean
     and takes the model updates into account.
     """
-    def __init__(self, aux_loader: DataLoader, momentum: float = 0.9):
+    def __init__(self, aux_loader: DataLoader, momentum: float = 0.8):
         """Initialize the estimator.
 
         Args:
             aux_loader (DataLoader): the auxiliary data used for gradient estimation.
-            momentum (float, optional): the gradient estimation momentum. Defaults to 0.9.
+            momentum (float, optional): the gradient estimation momentum. Defaults to 0.8.
         """
         self._data_len = len(aux_loader.dataset)
         self.aux_loader_iter = iter(cycle(aux_loader))
-        self.momentum = momentum
+
+        # Gradient moment
         self._acc_grad: Tensor = None
+        self.momentum = momentum
+
+    def per_sample_gradients(self, model: nn.Module, criterion: _Loss) -> Tensor:
+        device = _detect_device(model)
+
+        # Copy the model since we modify its gradients
+        model = deepcopy(model)
+        X, y = next(self.aux_loader_iter)
+        X, y = X.to(device), y.to(device)
+
+        jacs = fed.per_sample_grads(model, X, y, criterion)
+        jac_matrix = fed.combine_jacobians(list(jacs.values()))
+        return jac_matrix
     
     # NOTE: Assumes that `criterion.reduction == 'mean'`
     def average_clean_gradient(self, model: nn.Module, criterion: _Loss) -> Tensor:
@@ -164,28 +194,22 @@ class ShadowGradientEstimator(GradientEstimator):
 
         if self._acc_grad is not None:
             m = self.momentum
-            # Compute the exponential moving averaged gradient
-            ema_grad = m * self._acc_grad + (1 - m) * grad
+            # Compute the "average" gradient with moment
+            grad_moment = m * self._acc_grad + (1 - m) * grad
         else:
-            ema_grad = grad
+            grad_moment = grad
 
-        self._acc_grad = ema_grad.detach_().clone()
-        return ema_grad
+        self._acc_grad = grad_moment.detach_().clone()
+        return grad_moment
     
     def std_clean_gradient(self, model: nn.Module, criterion: _Loss):
-        model = deepcopy(model)
-        device = _detect_device(model)
-
-        X, y = next(self.aux_loader_iter)
-        X, y = X.to(device), y.to(device)
-
-        fed.per_sample_grads(model, X, y, criterion, store_in_params=True)
-        std = OmniscientGradientEstimator().std_clean_gradient(model, criterion)
-        fed.set_jacs_to_none(model)
-        return std
+        aggregator = fed.Stddev()
+        matrix = self.per_sample_gradients(model, criterion)
+        return aggregator(matrix)
 
     def reset(self):
         self._acc_grad = None
+        self._per_sample_grads_cache = None
 
     def __repr__(self):
         return (
@@ -402,12 +426,15 @@ class GradientInverter:
                 loss_atk = 1.0 - torch.cosine_similarity(model_grad, target_grad, dim=0)
 
             case GradientAttack.ASCENT:
+                # FIXME: this is incorrect : model grad is only poisoned grad,
+                # but want to compare aggregated clean + poison grads
                 cos_sim = torch.cosine_similarity(model_grad, target_grad, dim=0)
                 # dot product increases the gradient size but makes unalignment easier
                 #loss_atk = g_p.dot(avg_clean_gradient)
                 loss_atk = cos_sim
             
             case GradientAttack.ORTHOGONAL:
+                # FIXME: Same as above
                 cos_sim = torch.cosine_similarity(model_grad, target_grad, dim=0)
                 loss_atk = cos_sim ** 2
 
@@ -431,8 +458,9 @@ class GradientInverter:
         y_pred = model(x_p.unsqueeze(0)).squeeze()
         loss = criterion(y_pred, y_p)
         loss.backward(create_graph=differentiable)
+        model_grad = combined_model_gradients(model)
         return self.gradient_objective(
-            combined_model_gradients(model),
+            model_grad,
             target_grad,
             x_p,
         )
@@ -456,7 +484,7 @@ class GradientInverter:
         clean_batch_size = settings.num_clean
         num_harmful = settings.num_byzantine
 
-        jac_matrix.requires_grad_(False)
+        jac_matrix.requires_grad_(False).detach_()
         if z_init == None:
             from torch.linalg import norm
             grad_norms = norm(jac_matrix, dim=1)
@@ -473,12 +501,7 @@ class GradientInverter:
         agr_agnostic = not isinstance(aggregator, fed.Krum)
         if agr_agnostic:
             # We use the Min-Sum AGR-agnostic attack as in the paper
-            # TODO: compute an approximation of cdist by projecting all gradients
-            # on a random subset of the coordinates. Would this miss some large values???
-            dist_matrix = torch.cdist(
-                jac_matrix, jac_matrix,
-                compute_mode="donot_use_mm_for_euclid_dist",
-            )
+            dist_matrix = mem_aware_pdist(jac_matrix)
             max_d2_sum = (dist_matrix**2).sum(dim=0).max().item()
         else:
             # Expand Jacobian matrix with the harmful gradients
@@ -486,7 +509,7 @@ class GradientInverter:
                 jac_matrix,
                 torch.zeros(num_harmful, jac_matrix.shape[1], device=jac_matrix.device)
             ))
-
+        
         z = z_init
         z_succ = float('inf')
         accepted = False
@@ -515,10 +538,7 @@ class GradientInverter:
             else:
                 # We run the Min-Sum AGR-agnostic attack
                 assert agr_agnostic
-                dist_matrix = torch.cdist(
-                    jac_matrix, poisoned_grad.unsqueeze(0),
-                    compute_mode="donot_use_mm_for_euclid_dist",
-                )
+                dist_matrix = torch.cdist(jac_matrix, poisoned_grad.unsqueeze(0))
                 assert dist_matrix.shape == (jac_matrix.shape[0], 1)
                 d2_sum = (dist_matrix**2).sum(dim=0).item()
                 accepted = (d2_sum <= max_d2_sum)
@@ -532,6 +552,19 @@ class GradientInverter:
         
         #print(f"Success ({num_selected=})!")
         return z_succ
+    
+    def _check_jac_matrix_shape(self, jac_matrix: Tensor, settings: LearningSettings):
+        if (isinstance(self.estimator, ShadowGradientEstimator) and
+            isinstance(settings.aggregator, fed.Krum)):
+            clean_batch_size = settings.num_clean
+            aux_batch_size = jac_matrix.shape[0]
+
+            assert clean_batch_size == aux_batch_size, (
+                f"Auxiliary dataset batch size is {aux_batch_size}, which is different "
+                f"from clean batch size ({clean_batch_size}). "
+                f"Aggregator is {settings.aggregator} so its parameters would be "
+                f"inconsistent when performing the LIE attack."
+            )
 
     def lie_attack(self, model: nn.Module, settings: LearningSettings) -> Tensor:
         """Find the target gradient for the Little Is Enough attack.
@@ -539,29 +572,9 @@ class GradientInverter:
         Returns:
             target_grad (Tensor): the target gradient.
         """
-        clean_batch_size = settings.num_clean
-        device = _detect_device(model)
-
-        # Get the per-sample clean gradients
-        if isinstance(self.estimator, OmniscientGradientEstimator):
-            # The true per-sample gradients are already stored in model parameters .jac field
-            assert all(
-                clean_batch_size == param.grad.shape[0]
-                for param in model.parameters()
-            )
-            jacs = [param.jac for param in model.parameters()]
-        elif isinstance(self.estimator, ShadowGradientEstimator):
-            X, y = next(self.estimator.aux_loader_iter)
-            X, y = X.to(device), y.to(device)
-            # Compute some shadow per-sample gradients
-            jacs = list(fed.per_sample_grads(model, X, y, settings.criterion).values())
-            if isinstance(settings.aggregator, fed.Krum):
-                assert clean_batch_size == len(X), (
-                    "Auxiliary dataset batch size must be equal to clean batch size "
-                    "so the Krum parameters remain consistent when performing the LIE attack"
-                )
-
-        jac_matrix = fed.combine_jacobians(jacs)
+        # Get the per-sample clean gradients (or their estimation)
+        jac_matrix = self.estimator.per_sample_gradients(model, settings.criterion)
+        self._check_jac_matrix_shape(jac_matrix, settings)
 
         agg_grad = settings.aggregator(jac_matrix).requires_grad_(False)
         std_grad = fed.Stddev()(jac_matrix).requires_grad_(False)
@@ -634,7 +647,7 @@ class GradientInverter:
             # TODO: log gradient estimation quality
             target_grad = self.estimator.average_clean_gradient(model, criterion)
         target_grad.requires_grad_(False)
-        
+
         # This detaches the model and its gradients
         model = deepcopy(model)
         model.eval()
@@ -699,7 +712,7 @@ class GradientInverter:
                 if loss_atk_3 < loss_atk_2:
                     y_p = y_candidate
                     loss_atks[step] = loss_atk_3.item()
-        
+            
             y_p.requires_grad_(False)
             y_p.grad = None
             model.zero_grad()
@@ -732,8 +745,11 @@ def combined_model_gradients(model: nn.Module) -> Tensor:
     """
     Returns the model gradients without detaching them, combined into a single vector.
     """
-    grads = [
-        param.grad.flatten()
-        for param in model.parameters()
-    ]
+    return combine_gradients([param.grad for param in model.parameters()])
+
+def combine_gradients(grads: list[Tensor]) -> Tensor:
+    """
+    Combine gradients into a single vector without detaching them.
+    """
+    grads = [grad.flatten() for grad in grads]
     return torch.cat(grads)
