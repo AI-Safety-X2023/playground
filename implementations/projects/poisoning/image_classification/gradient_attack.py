@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from enum import Enum
 from random import randint
+import numpy as np
 import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
@@ -663,9 +664,15 @@ class GradientInverter:
         X_p, y_p = inverter.attack(model, settings)
         ```
         """
+        
+        # TODO: remove all of self hyperparameters from the start
+        tracker = PoisonOptimizer(
+            steps=self.steps,
+            lr=self.lr, lr_decay=self.lr_decay, momentum=self.momentum,
+        )
         # FIXME: not reliable
-        training_data: EagerDataset = self.sample_init.dataset
-        num_classes = len(training_data.classes)
+        tracker.configure_dataset(self.sample_init.dataset)
+        
         device = _detect_device(model)
 
         if self.method == GradientAttack.LITTLE_IS_ENOUGH:
@@ -683,101 +690,53 @@ class GradientInverter:
         model.zero_grad()
 
         x_p, y_p = self.sample_init()
-        
-        x_p = x_p.to(device)
-        y_p = F.one_hot(y_p, num_classes).float().to(device)
-        # We optimize on the image...
-        opt = Adam([x_p], lr=self.lr, betas=(self.momentum, self.momentum))
-        lr_sched = LinearLR(opt, start_factor=self.lr_decay, total_iters=8)
-        # ...and occasionally on the label.
 
-        loss_atks = torch.zeros(self.steps)
-        poisons = []
-        last_restart = 0
-        for step in range(self.steps):
-            x_p.requires_grad_(True)
-            y_p.requires_grad_(True)
+        tracker.start(x_p, y_p, device)
+        
+        for step in range(tracker.steps):
 
             # --I--
-            loss_atk = self.poison_objective(
-                x_p, y_p, target_grad,
-                model, criterion, settings, differentiable=True,
+            loss_atk = tracker.opt_step(
+                lambda x_p, y_p: self.poison_objective(
+                    x_p, y_p, target_grad,
+                    model, criterion, settings, differentiable=True,
+                )
             )
-            loss_atks[step] = loss_atk.item()
-
-            # Clear `loss` gradients on `x_p`
-            opt.zero_grad()
-
-            # Optimize `x_p`
-            loss_atk.backward(inputs=x_p)
-            opt.step()
-            lr_sched.step()
-            opt.zero_grad()
             model.zero_grad()
-
-            # Avoids autograd graph errors when modifying tensor in-place
-            x_p.requires_grad_(False)
-            # Projected optimization algorithm
-            training_data.clip_to_data_range(x_p, inplace=True)
 
             loss_atk_2 = self.poison_objective(
                 x_p, y_p, target_grad,
                 model, criterion, settings,
-            )
+            ).item()
 
             if loss_atk_2 > loss_atk:
                 # TODO: random restart here?
                 pass
-            if (self.method == GradientAttack.ASCENT
-                    and loss_atk_2.item() > 0.25
-                    and step - last_restart > 2
-                    and step < min(6, self.steps - 4)):
-                # Just restart
-                last_restart = step
-                x_p, y_p = self.sample_init.restart()
-                x_p = x_p.to(device)
-                y_p = F.one_hot(y_p, num_classes).float().to(device)
-                opt = Adam([x_p], lr=self.lr, betas=(self.momentum, self.momentum))
-                lr_sched = LinearLR(
-                    opt, start_factor=self.lr_decay, total_iters=(self.steps - step))
-                poisons.append((x_p.detach().clone(), y_p.detach().clone()))
-                continue
+            if (self.method in (GradientAttack.ASCENT, GradientAttack.ORTHOGONAL)
+                    and loss_atk_2.item() > 0.25 # Needs to be a positive number
+                    and step - tracker.last_restart > 2
+                    and step < min(6, tracker.steps - 4)):
 
-            # --II---
-            if self.label_update_schedule(step):
-                # Instead of optimal label flipping (as in https://arxiv.org/abs/2503.00140),
-                # we guess the best class based on `loss_atk` gradients w.r.t y
-                # Efficiency is key when the number of classes grows
-                y_candidate = F.one_hot(y_p.grad.argmin(), num_classes).float()
-                loss_atk_3 = self.poison_objective(
-                    x_p, y_candidate, target_grad,
-                    model, criterion, settings,
-                )
-                # Change the class if it improves the adversary's objective
-                if loss_atk_3 < min(loss_atk, loss_atk_2):
-                    y_p = y_candidate
-                    loss_atks[step] = loss_atk_3.item()
+                x_p, y_p = self.sample_init.restart()
+                tracker._restart(x_p, y_p, device)
+                continue
             
-            poisons.append((x_p.detach().clone(), y_p.detach().clone()))
             y_p.requires_grad_(False)
             y_p.grad = None
             model.zero_grad()
         
-        best_step = loss_atks.argmin().item()
-        x_p, y_p = poisons[best_step]
-        loss_atk = loss_atks[best_step]
+        (x_p, y_p), loss_atk = tracker.best_result()
 
         if logger is not None:
             # Inject metric in logger.
             # FIXME: this is not a robust solution
             if 'loss_atk' not in logger.additional_metrics:
                 logger.additional_metrics['loss_atk'] = CatMetric()
-            logger.compute_additional_metrics(['loss_atk'], loss_atks.unsqueeze(0))
+            history = torch.tensor(tracker.loss_atks)
+            logger.compute_additional_metrics(['loss_atk'], history.unsqueeze(0))
         
-        y_p = y_p.argmax()
-
         if isinstance(self.sample_init, SampleInitFeedback):
-            l = loss_atk.item()
+            l = loss_atk
             m = {
                 GradientAttack.ASCENT: 0.0,
                 GradientAttack.ORTHOGONAL: 0.2,
@@ -795,6 +754,108 @@ class GradientInverter:
             f"tv_coef={self.tv_coef}, lr={self.lr}, sample_init={self.sample_init}, "
             f"label_update_schedule={self.label_update_schedule})"
         )
+
+
+
+class PoisonOptimizer:
+    """A poison tracker and optimizer."""
+    def __init__(self, steps = 5, lr = 0.5, lr_decay = 0.9, momentum = 0.6):
+        self.steps = steps
+        self.lr = lr
+        self.lr_decay = lr_decay
+        self.momentum = momentum
+
+        self.dataset: EagerDataset = None
+        self.num_classes: int = None
+
+        self.x_p: Tensor = None
+        self.y_p: Tensor = None
+        self.opt: Adam = None
+        self.lr_sched: LinearLR = None
+
+        self.poisons: list[tuple[Tensor, Tensor]] = []
+        self.loss_atks: list[float] = []
+        self.step = 0
+        self.last_restart = 0
+    
+    def configure_dataset(self, dataset: EagerDataset):
+        """Configure the dataset for data bounds."""
+        self.dataset = dataset
+        self.num_classes = len(dataset.classes)
+    
+    def start(self, x_p: Tensor, y_p: Tensor, device: str):
+        """Initialize the optimizer on the initial poisons."""
+        assert self.dataset is not None, "Dataset not configured"
+        
+        self.poisons = []
+        self.loss_atks = []
+
+        self._restart(x_p, y_p, device)
+    
+    def _restart(self, x_p: Tensor, y_p: Tensor, device: str):
+        self.last_restart = self.step
+
+        self.x_p = x_p.to(device)
+        self.y_p = self._one_hot_vector(y_p).to(device)
+
+        # We optimize on the image.
+        self.opt = Adam([x_p], lr=self.lr, betas=(self.momentum, self.momentum))
+        # Decay the learning rate to improve convergence.
+        self.lr_sched = LinearLR(
+            self.opt, start_factor=self.lr_decay, total_iters=(self.steps - self.step))
+        
+        if self.step > 0:
+            self._append_poisons()
+        
+    def _append_poisons(self):
+        self.poisons.append((self.x_p.detach().clone(), self.y_p.detach().clone()))
+
+    def opt_step(self, atk_objective) -> float:
+        """Perform a single optimization step against an attacking objective.
+        
+        Parameters:
+            atk_objective ((Tensor, Tensor) -> Tensor): the attacking objective function,
+                which takes a poisoned data as two arguments.
+        
+        Returns
+            objective (float): the objective value.
+        """
+        self.x_p.requires_grad_(True)
+        #self.y_p.requires_grad_(True) # Just to populate the .grad field
+        self.opt.zero_grad() # Clear `loss` gradients on `x_p`
+
+        # --I--
+        loss_atk: Tensor = atk_objective(self.x_p, self.y_p)
+        self.loss_atks.append(loss_atk.item())
+
+        # Optimize `x_p`
+        loss_atk.backward(inputs=self.x_p)
+        self.opt.step()
+        self.opt.zero_grad()
+        self.lr_sched.step()
+
+        # Avoids autograd graph errors when modifying tensor in-place
+        self.x_p.requires_grad_(False)
+        self._keep_poison_within_bounds()
+
+        self._append_poisons()
+        self.step += 1
+
+        return self.loss_atks[-1]
+    
+    def _keep_poison_within_bounds(self):
+        # Projected optimization algorithm
+        self.dataset.clip_to_data_range(self.x_p, inplace=True)
+    
+    def _one_hot_vector(self, y: int) -> Tensor:
+        return F.one_hot(y, self.num_classes).float()
+    
+    def best_result(self) -> tuple[tuple[Tensor, Tensor], float]:
+        """Returns the best poison with its poison objective value."""
+        best_step = np.argmin(self.loss_atks).item()
+        x_p, y_p = self.poisons[best_step]
+        return (x_p, y_p.argmax()), self.loss_atks[best_step]
+
 
 
 def combined_model_gradients(model: nn.Module) -> Tensor:

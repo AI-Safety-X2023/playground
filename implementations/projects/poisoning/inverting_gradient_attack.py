@@ -477,7 +477,7 @@ class Pipeline:
         unlearner = deepcopy(model)
 
         uhparams: dict = self.unlearning_hparams[method]
-        epochs = uhparams['epochs']
+        epochs = uhparams.get('epochs')
         k = uhparams.get('k')
 
         match method:
