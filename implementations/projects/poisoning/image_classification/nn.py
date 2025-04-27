@@ -56,7 +56,7 @@ class MetricLogger:
         self.pbar = tqdm(desc=desc, total=total, leave=keep_pbars)
         # Forces storage of description even if progress bar is disabled
         self.pbar.desc = desc or ''
-    
+
     @property
     def all_metrics(self) -> dict[str, Metric]:
         """The training metrics and the additional metrics."""
@@ -68,7 +68,7 @@ class MetricLogger:
             X: Tensor, y: Tensor, logits: Tensor, loss: float,
         ) -> dict[str, Metric]:
         """Compute the main training metrics.
-        
+
         The training metrics take the arguments `(logits, y)`. The `'avg_loss'`
         mean metric is special and takes the argument `loss`.
         """
@@ -80,7 +80,7 @@ class MetricLogger:
                 metric.increment()
 
             value = metric(logits, y)
-            
+
             if isinstance(value, dict):
                 for n, v in value.items():
                     assert isinstance(v, Tensor)
@@ -95,14 +95,14 @@ class MetricLogger:
 
         self.pbar.n += len(X)
         self.pbar.set_postfix(**metric_values)
-    
+
     def compute_additional_metrics(self, metric_names: list[str], *args):
         """Compute the additional metrics with custom arguments."""
         for name in metric_names:
             self.additional_metrics[name](*args)
 
-    def finish(self):      
-        """Close the progress bar."""      
+    def finish(self):
+        """Close the progress bar."""
         if self.pbar.leave:
             # Fixes a bug where the HTML output does not survive after closing notebook
             print(self.pbar)
@@ -113,7 +113,7 @@ class MetricLogger:
 
 class Logs:
     """An object that tracks training and validation metrics over epochs.
-    
+
     Parameters:
         train_metrics (list of dict of Metric):
             a list of computed metrics indexed by the training epoch.
@@ -128,7 +128,7 @@ class Logs:
         self.train_metrics: list[dict[str, Metric]] = []
         self.val_metrics: list[dict[str, Metric]] = []
         self.unlearn_metrics:  list[dict[str, Metric]] = []
-    
+
     def update_train_epoch(self, train_logger: MetricLogger):
         """Update the training metrics of an epoch.
 
@@ -137,7 +137,7 @@ class Logs:
                 the training epoch.
         """
         self.train_metrics.append(train_logger.all_metrics)
-    
+
     def update_val_epoch(self, val_logger: MetricLogger = None):
         """Update the validation metrics of an epoch.
 
@@ -150,7 +150,7 @@ class Logs:
         else:
             metrics = val_logger.all_metrics
         self.val_metrics.append(metrics)
-    
+
     def update_unlearn_epoch(self, unlearn_logger: MetricLogger = None):
         """Update the unlearn metrics of an epoch.
 
@@ -198,7 +198,7 @@ def train_epoch(
         optimizer.zero_grad()
 
         logger.compute_metrics(X, y, logits, loss.item())
-    
+
     logger.finish()
     return logger
 
@@ -212,7 +212,7 @@ def test_epoch(
     device = _detect_device(model)
     # Set the model to evaluation mode - important for batch normalization and dropout layers
     model.eval()
-    
+
     logger = MetricLogger(
         metric,
         desc='Test epoch', total=len(dataloader.dataset), keep_pbars=keep_pbars,
@@ -222,7 +222,7 @@ def test_epoch(
     # also serves to reduce unnecessary gradient computations and memory usage for tensors with requires_grad=True
     with torch.no_grad():
         for (X, y) in dataloader:
-            X, y = X.to(device), y.to(device)    
+            X, y = X.to(device), y.to(device)
             logits = model(X)
             loss = loss_fn(logits, y).item()
 
@@ -243,12 +243,12 @@ def train_loop(
         metric: Metric = None,
     ) -> Logs:
     """Run the training loop on the model without testing.
-    
+
     Parameters:
         keep_pbars (bool, optional): whether to keep progress bars. Defaults to `True`.
         metric (torchmetrics.Metric, optional): a metric (or a metric collection) that takes
             true labels and logits as arguments.
-    
+
     Returns:
         logs (Logs): the complete history of tracked metrics.
     """
@@ -285,7 +285,7 @@ def train_val_loop(
     If `val_dataloader` is `None`, no validation is performed.
 
     If `early_stopping` is True, the training loop exits when validation loss starts decreasing.
-    
+
     Returns:
         logs (Logs): the training and validation logged metrics at each epoch.
     """
@@ -300,7 +300,7 @@ def train_val_loop(
 
         if lr_scheduler is not None:
             lr_scheduler.step()
-        
+
         if val_dataloader is not None and epoch % validate_every == 0:
             logger = test_epoch(
                 model, val_dataloader, loss_fn,
@@ -314,7 +314,7 @@ def train_val_loop(
             val_loss = next_val_loss
         else:
             logs.update_val_epoch()
-    
+
     return logs
 
 
@@ -339,6 +339,7 @@ def distillation_epoch(
         - `logits_teacher` : the teacher model predictions
         - `target` : the target in the dataset
     """
+    device = _detect_device(student)
     student.train()
     teacher.eval()
 
@@ -348,6 +349,7 @@ def distillation_epoch(
     )
 
     for X, target in dataloader:
+        X, target = X.to(device), target.to(device)
         # Compute teacher and student predictions
         logits_teacher = teacher(X)
         logits_student = student(X)
@@ -424,10 +426,10 @@ class Hyperparameters:
             loss_fn=self.loss_fn,
             optimizer=self.make_optimizer(model),
         )
-    
+
     def test_loop_params(self) -> dict:
         return dict(loss_fn=self.loss_fn, metric=self.metric)
-    
+
     def train_test_params(
             self,
             model: nn.Module,
@@ -440,10 +442,10 @@ class Hyperparameters:
         """
         A utility function that returns appropriate keyword hyperparameters
         for training a model with `train_val_loop`.
-        
+
         The hyperparameters can be adjusted according to the keyword arguments
         to this function.
-        
+
         In particular, the loss function can be modified to handle class imbalance
         in the dataset.
 
@@ -452,7 +454,7 @@ class Hyperparameters:
         loss_fn = deepcopy(self.loss_fn)
         if tune_loss_fn and isinstance(loss_fn, _WeightedLoss):
             set_loss_weights(loss_fn, dataset)
-        
+
         return dict(
             epochs=self.epochs,
             loss_fn=loss_fn,

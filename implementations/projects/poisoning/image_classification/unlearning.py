@@ -18,21 +18,20 @@ from .nn import (
 )
 
 
-def model_layers(model: nn.Module, first: int, last: int):
+def model_layers(model: nn.Module, first: int = None, last: int = None):
     """
-    Iterate on model layers from `first` to `last` (inclusive).
+    Iterate on model layers from `first` to `last` (exclusive).
 
-    `first` and `last` may be negative, for instance `-1` refers to the last layer.
+    `first` and `last` may be negative or `None`, for instance `-1` refers to the last layer.
     Layers without parameters are not included.
     """
     # Don't include containers such as `Sequential` and activation layers
     layers = [module for module in model.modules() if module._parameters]
-    if last == -1:
-        return iter(layers[first:])
     return iter(layers[first:last])
 
 def forget_last_layers(model: nn.Module, k: int):
-    for layer in model_layers(model, -k, -1):
+    assert k > 0
+    for layer in model_layers(model, -k):
         if hasattr(layer, 'reset_parameters'):
             layer.reset_parameters()
         else:
@@ -52,7 +51,7 @@ def unlearning_last_layers(model: nn.Module, k: int, mode='cfk'):
         mode (str): the unlearning variant
             - `'euk'` : use the EUk algorithm, i.e. retrain the last layers form scratch
             - `'cfk'` : use the CFk algorithm, i.e. don't retrain from scratch (default)
-    
+
     Example:
 
     ```python
@@ -64,22 +63,23 @@ def unlearning_last_layers(model: nn.Module, k: int, mode='cfk'):
         for param in layer.parameters():
             param.requires_grad = grad
 
-    # Alternative: optimizer = Adam(last_layers_module.parameters())
     def _freeze_layers_except_last(model: nn.Module, k: int):
-        for layer in model_layers(model, 0, -(k-1)):
+        assert k > 0
+        for layer in model_layers(model, 0, -k):
             _set_layer_grad_updates(layer, False)
 
     def _unfreeze_layers_except_last(model: nn.Module, k: int):
-        for layer in model_layers(model, 0, -(k-1)):
+        assert k > 0
+        for layer in model_layers(model, 0, -k):
             _set_layer_grad_updates(layer, False)
-    
+
     algos = ['cfk', 'euk']
     if mode not in algos:
         raise ValueError(f'Invalid mode: `{mode}`. Valid algorithms: {algos}')
 
     if mode == 'euk':
         forget_last_layers(model, k)
-    
+
     _freeze_layers_except_last(model, k)
     yield
     _unfreeze_layers_except_last(model, k)
@@ -154,7 +154,7 @@ class NoisySGD(SGD):
             for param in group['params']:
                 noise = torch.randn_like(param.data) * self.noise_scale
                 param.data -= group['lr'] * noise
-        
+
         return loss
 
 
@@ -181,7 +181,7 @@ def neg_grad_plus(
         metric: Metric = None,
     ) -> MetricLogger:
     """NegGrad+ algorithm from Kurmanji et al.
-    
+
     A finetuning-based unlearning algorithm that balances gradient ascent
     on the forget set and gradient descent on the retain set.
 
@@ -200,7 +200,7 @@ def neg_grad_plus(
         metric,
         desc='NegGrad+', total=len(forget.dataset), keep_pbars=keep_pbars,
     )
-    
+
     # This prevents errors in case `retain` has less many elements than `forget`.
     # Usually not needed.
     retain_iter = cycle(retain)
@@ -225,7 +225,7 @@ def neg_grad_plus(
         optimizer.zero_grad()
 
         logger.compute_metrics(X_r, y_r, logits_r, loss.item())
-    
+
     logger.finish()
     return logger
 
@@ -298,7 +298,7 @@ def oracle_unlearning(
         optimizer.zero_grad()
 
         logger.compute_metrics(X_f, y_f, None, loss.item())
-    
+
     logger.finish()
     return logger
 
@@ -321,7 +321,7 @@ def scrub_unlearning_epoch(
         # FIXME: this requires some output regularization to avoid overflow.
         kl = F.kl_div(logits_student, logits_teacher, log_target=True, reduction='mean')
         return - beta * kl
-    
+
     return distillation_epoch(
         teacher, student,
         forget,
@@ -377,7 +377,7 @@ def scrub(
         val_loader: DataLoader = None,
     ) -> Logs:
     """SCRUB algorithm from Kurmanji et al.
-    
+
     A state-of-the-art unlearning algorithm that selectively trains
     a student model on a teacher model.
 
@@ -419,6 +419,6 @@ def scrub(
                 keep_pbars=keep_pbars, metric=metric,
             )
             logs.update_val_epoch(logger)
-    
+
     return logs
 
