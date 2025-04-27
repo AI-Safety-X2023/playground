@@ -408,7 +408,9 @@ class GradientInverter:
             steps: int,
             sample_init: SampleInit,
             tv_coef = 0.0,
-            lr = 0.3, # TODO: find appropriate lr scheduling step
+            lr = 0.5,
+            lr_decay = 0.9,
+            momentum = 0.6,
             label_update_schedule: Schedule = PowerofTwoSchedule(),
         ):
         self.method = method
@@ -416,6 +418,8 @@ class GradientInverter:
         self.steps = steps
         self.tv_coef = tv_coef
         self.lr = lr
+        self.lr_decay = lr_decay
+        self.momentum = momentum
         self.sample_init = sample_init
         self.label_update_schedule = deepcopy(label_update_schedule)
 
@@ -449,8 +453,9 @@ class GradientInverter:
                 grad_a_p = (1. - alpha) * grad_a + alpha * grad_p
                 cos_sim = torch.cosine_similarity(grad_a_p, grad_a, dim=0)
                 # dot product increases the gradient size but makes unalignment easier
-                loss_atk = grad_p.dot(target_grad) / target_grad.dot(target_grad)
-                loss_atk += cos_sim
+                #loss_atk = grad_p.dot(target_grad) / target_grad.dot(target_grad)
+                #loss_atk += cos_sim
+                loss_atk = cos_sim
             
             case GradientAttack.ORTHOGONAL:
                 grad_a = target_grad
@@ -603,10 +608,6 @@ class GradientInverter:
         std_grad = agg_grad.sign()
 
         z = self._lie_find_std_factor(settings, jac_matrix, agg_grad, std_grad)
-        print(
-            f"{jac_matrix.norm(dim=1).mean():.3} {agg_grad.norm().mean():.3} "
-            f"{std_grad.norm().mean():.3} {z:.3}"
-        )
 
         # Calculate the final gradient of the attack (LIE)
         return agg_grad + z * std_grad
@@ -686,12 +687,13 @@ class GradientInverter:
         x_p = x_p.to(device)
         y_p = F.one_hot(y_p, num_classes).float().to(device)
         # We optimize on the image...
-        opt = Adam([x_p], lr=self.lr)
-        lr_sched = LinearLR(opt, start_factor=0.5, total_iters=4)
+        opt = Adam([x_p], lr=self.lr, betas=(self.momentum, self.momentum))
+        lr_sched = LinearLR(opt, start_factor=self.lr_decay, total_iters=8)
         # ...and occasionally on the label.
 
         loss_atks = torch.zeros(self.steps)
         poisons = []
+        last_restart = 0
         for step in range(self.steps):
             x_p.requires_grad_(True)
             y_p.requires_grad_(True)
@@ -722,7 +724,25 @@ class GradientInverter:
                 x_p, y_p, target_grad,
                 model, criterion, settings,
             )
-            
+
+            if loss_atk_2 > loss_atk:
+                # TODO: random restart here?
+                pass
+            if (self.method == GradientAttack.ASCENT
+                    and loss_atk_2.item() > 0.25
+                    and step - last_restart > 2
+                    and step < min(6, self.steps - 4)):
+                # Just restart
+                last_restart = step
+                x_p, y_p = self.sample_init.restart()
+                x_p = x_p.to(device)
+                y_p = F.one_hot(y_p, num_classes).float().to(device)
+                opt = Adam([x_p], lr=self.lr, betas=(self.momentum, self.momentum))
+                lr_sched = LinearLR(
+                    opt, start_factor=self.lr_decay, total_iters=(self.steps - step))
+                poisons.append((x_p.detach().clone(), y_p.detach().clone()))
+                continue
+
             # --II---
             if self.label_update_schedule(step):
                 # Instead of optimal label flipping (as in https://arxiv.org/abs/2503.00140),
@@ -734,7 +754,7 @@ class GradientInverter:
                     model, criterion, settings,
                 )
                 # Change the class if it improves the adversary's objective
-                if loss_atk_3 < loss_atk_2:
+                if loss_atk_3 < min(loss_atk, loss_atk_2):
                     y_p = y_candidate
                     loss_atks[step] = loss_atk_3.item()
             

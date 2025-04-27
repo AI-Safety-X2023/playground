@@ -116,11 +116,11 @@ class Hyperparams:
             elif is_shufflenet:
                 # Best for ShuffleNetV2
                 return Hyperparams(
-                    lr=2e-3, 
-                    epochs=6, 
+                    lr=2e-3,
+                    epochs=6,
                     weight_decay=1e-5,
                 )
-        
+
         if not (is_resnet or is_shufflenet):
             warn(
                 f"Warning: unknown model {model_name}, "
@@ -227,10 +227,10 @@ class Pipeline:
             Unlearning.EUK: dict(k=6, lr=lr, epochs=epochs//2),
             Unlearning.SCRUB: dict(max_steps=1, steps=1, alpha=0.1, beta=0.01, gamma=0.9),
         }
-    
+
     def make_dataloaders(self) -> tuple[DataLoader, DataLoader]:
         """Make the training and validation dataloaders.
-        
+
         These dataloaders are guaranteed to be clean.
         """
         # TODO: clone?
@@ -333,7 +333,7 @@ class Pipeline:
                 # ---
 
                 loss = loss_c + loss_p
-            
+
             elif isinstance(aggregator, Krum):
                 fed.per_sample_grads(model, X, y, criterion, store_in_params=True)
 
@@ -357,24 +357,24 @@ class Pipeline:
 
                 fed.aggregate_and_store_grads(model, aggregator)
                 loss = criterion(model(X), y) + criterion(model(X_p_), y_p_)
-            
+
             else:
                 raise NotImplementedError(f"Unknown aggregator: {aggregator.__class__}")
-            
+
             for _ in range(f):
                 # Repeat the poisons at identical in the poison set.
                 # This is necessary so that unlearning can perform enough steps
                 poison_set.append(X_p, y_p)
-            
+
             optimizer.step()
             optimizer.zero_grad()
-            
+
             # FIXME: does not include X_p, y_p, logits_p, loss_p
             # TODO: log loss on poisons
             # TODO: display some poisons
             logger.compute_metrics(X, y, logits, loss.item())
             #logger.compute_additional_metrics(['avg_poison_loss'], loss_p)
-        
+
         logger.finish()
         return poison_set, logger
 
@@ -384,7 +384,7 @@ class Pipeline:
         Parameters:
             model (Module): an untrained neural network.
 
-        Returns:            
+        Returns:
             logs (Logs): training logs.
         """
         train_loader, val_loader = self.make_dataloaders()
@@ -413,7 +413,7 @@ class Pipeline:
 
         Returns:
             poisons (TensorDataset): the crafted, deduplicated poisons.
-            
+
             logs (Logs): training logs.
         """
         print("Poisoning", self._fmt_poisoning(inverter))
@@ -438,7 +438,7 @@ class Pipeline:
                 keep_pbars=True, metric=metric,
             )
             logs.update_val_epoch(logger)
-        
+
         return poison_set.to_tensor_dataset(), logs
 
     def unlearn_loop(
@@ -468,7 +468,7 @@ class Pipeline:
         metric = self.make_metrics()
 
         unlearner = deepcopy(model)
-        
+
         uhparams: dict = self.unlearning_hparams[method]
         epochs = uhparams['epochs']
         k = uhparams.get('k')
@@ -494,7 +494,7 @@ class Pipeline:
             case Unlearning.GRADIENT_ASCENT:
                 opt = self.make_optimizer(unlearner, opt_cls=SGD, lr=lr)
                 logs = gradient_ascent(
-                    unlearner, train_loader, val_loader,
+                    unlearner, forget_loader, val_loader,
                     criterion, opt, epochs=epochs,
                     keep_pbars=False, metric=metric,
                 )
@@ -525,9 +525,9 @@ class Pipeline:
                 )
             case _:
                 raise NotImplementedError(method)
-        
+
         return unlearner, logs
-    
+
     def train(
             self,
             model: nn.Module,
@@ -603,7 +603,7 @@ class Pipeline:
 
         Returns:
             model_results (tuple[Module, PipelineResults]): the unlearned model and
-                the pipeline results.        
+                the pipeline results.
         """
         forget_set, train_logs = self.train_loop_with_poisons(model, inverter)
         forget_loader = DataLoader(forget_set, self.hparams.batch_size)
@@ -613,16 +613,16 @@ class Pipeline:
             unlearn_logs=unlearn_logs,
             poison_set=forget_set,
         )
-    
+
     def _fmt_poisoning(self, inverter: GradientInverter) -> str:
         return f"{inverter} with hparams={self.hparams})"
-    
+
     def _fmt_unlearning(self, unlearning_method: Unlearning) -> str:
         return (
             f"{unlearning_method._name_} with "
             f"unlearning_hparams={self.unlearning_hparams[unlearning_method]})"
         )
-    
+
     def __repr__(self):
         return (
             f"Pipeline(settings={self.settings}, "
@@ -653,7 +653,7 @@ class PipelineResults:
         self.poison_set = poison_set
         self.train_logs = train_logs
         self.unlearn_logs = unlearn_logs
-    
+
     @property
     def poisoning(self) -> bool:
         return self.poison_set is not None
