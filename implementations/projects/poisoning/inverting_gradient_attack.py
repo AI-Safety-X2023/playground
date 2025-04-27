@@ -118,7 +118,7 @@ class Hyperparams:
                     weight_decay=1e-5,
                 ),
                 'ConvNet16': Hyperparams(
-                    lr=5e-3,
+                    lr=1e-3,
                     epochs=6,
                     weight_decay=0,
                     momentum=0,
@@ -230,8 +230,8 @@ class Pipeline:
             Unlearning.NOISY_GRADIENT_DESCENT: dict(lr=lr, epochs=1, noise_scale=np.sqrt(1e-7)),
             Unlearning.GRADIENT_ASCENT: dict(lr=1e-5, epochs=1),
             Unlearning.NEG_GRAD_PLUS: dict(lr=lr, beta=0.999, epochs=epochs),
-            Unlearning.CFK: dict(k=6, lr=lr, epochs=epochs//2),
-            Unlearning.EUK: dict(k=6, lr=lr, epochs=epochs//2),
+            Unlearning.CFK: dict(k=6, lr=lr, epochs=epochs),
+            Unlearning.EUK: dict(k=6, lr=lr, epochs=epochs),
             Unlearning.SCRUB: dict(max_steps=1, steps=1, alpha=0.1, beta=0.01, gamma=0.9),
         }
 
@@ -307,7 +307,7 @@ class Pipeline:
         optimizer = self.make_optimizer(model)
         metric = self.make_metrics()
 
-        poison_factor = self.settings.poison_factor
+        alpha = self.settings.poison_factor
         f = self.settings.num_byzantine
 
         model.train()
@@ -326,7 +326,7 @@ class Pipeline:
 
             if isinstance(aggregator, Mean):
                 # TODO: handle losses that don't reduce
-                loss_c = (1 - poison_factor) * criterion(logits, y)
+                loss_c = (1 - alpha) * criterion(logits, y)
                 loss_c.backward()
 
                 # --- poisoning attack
@@ -334,7 +334,7 @@ class Pipeline:
                 # Unsqueeze since model and criterion expect batch
                 X_p_, y_p_ = X_p.unsqueeze(0), y_p.unsqueeze(0)
                 logits_p = model(X_p_)
-                loss_p = poison_factor * criterion(logits_p, y_p_)
+                loss_p = alpha * criterion(logits_p, y_p_)
                 # This adds to `loss` model gradients due to gradient accumulation
                 loss_p.backward()
                 # ---
@@ -363,7 +363,9 @@ class Pipeline:
                 )
 
                 fed.aggregate_and_store_grads(model, aggregator)
-                loss = criterion(model(X), y) + criterion(model(X_p_), y_p_)
+                loss_c = criterion(model(X), y)
+                loss_p = criterion(model(X_p_), y_p_)
+                loss = (1 - alpha) * loss_c + alpha * loss_p
 
             else:
                 raise NotImplementedError(f"Unknown aggregator: {aggregator.__class__}")
@@ -371,6 +373,7 @@ class Pipeline:
             for _ in range(f):
                 # Repeat the poisons at identical in the poison set.
                 # This is necessary so that unlearning can perform enough steps
+                # FIXME: this might make input gradients break
                 poison_set.append(X_p, y_p)
 
             optimizer.step()

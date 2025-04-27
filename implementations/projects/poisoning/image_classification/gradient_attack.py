@@ -39,12 +39,28 @@ class GradientAttack(Enum):
     # https://arxiv.org/abs/1902.06156
     LITTLE_IS_ENOUGH = 2
 
+    # Min-Max (Shejwalkar & Houmansadr, 2021)
+    MIN_MAX = 3
+
+    # Min-Sum (Shejwalkar & Houmansadr, 2021)
+    MIN_SUM = 4
+
+    @property
+    def is_adaptative(self):
+        return self in (
+            GradientAttack.LITTLE_IS_ENOUGH,
+            GradientAttack.MIN_MAX,
+            GradientAttack.MIN_SUM,
+        )
+
     def __str__(self):
         return {
             GradientAttack.RECONSTRUCTION: "Reconstruction",
             GradientAttack.ASCENT: "Gradient Ascent",
             GradientAttack.ORTHOGONAL: "Orthogonal Gradient",
             GradientAttack.LITTLE_IS_ENOUGH: "Little Is Enough",
+            GradientAttack.MIN_MAX: "Min-Max",
+            GradientAttack.MIN_SUM: "Min-Sum",
         }[self]
 
 
@@ -498,10 +514,24 @@ class GradientInverter:
             settings: LearningSettings,
             jac_matrix: Tensor, agg_grad: Tensor, std_grad: Tensor,
             z_init: float = None, threshold: float = None,
+            method = GradientAttack.LITTLE_IS_ENOUGH,
         ) -> Tensor:
         """Find the best factor to deviate the (estimated) average gradient
         for Little Is Enough attack. This is the gradient attack specified in Algorithm 1
         of Shejwalkar and Houmansadr, *Manipulating the Byzantine* (2021) [1]
+
+        Arguments:
+            settings (LearningSettings): the poisoning and learning settings.
+            jac_matrix (Tensor): the per-sample gradients.
+            agg_grad (Tensor): the result of the aggregator on clean gradients.
+            std_grad (Tensor): the perturbation vector, which is the per-coordinate
+                standard deviation of the clean gradients.
+            z_init (float, optional): the starting factor. If `None`,
+                it is initialized  to a sensible value.
+            threshold (float, optional): the stopping threshold. If `None`,
+                it is initialized to a sensible value.
+            method (GradientAttack, optional): Little is Enough by default, but can be
+                overriden with other similar inversion methods (Min-Max, Min-Sum).
 
         Returns:
             z (Tensor): A single positive floating-point factor.
@@ -552,7 +582,7 @@ class GradientInverter:
 
             poisoned_grad = agg_grad - z * std_grad
 
-            if isinstance(aggregator, fed.Krum):
+            if isinstance(aggregator, fed.Krum) and method == GradientAttack.LITTLE_IS_ENOUGH:
                 # FIXME: this LIE attack against Krum never gets poisons selected...
 
                 # Update the poisoned gradients in the Jacobian matrix
@@ -563,13 +593,15 @@ class GradientInverter:
                 # Compute the number of gradients selected by the aggregator
                 num_selected = selection[clean_batch_size:].sum()
                 accepted = (num_selected >= 1)
-            else:
+            elif agr_agnostic or method == GradientAttack.MIN_SUM:
                 # We run the Min-Sum AGR-agnostic attack
                 assert agr_agnostic
                 dist_matrix = torch.cdist(jac_matrix, poisoned_grad.unsqueeze(0))
                 assert dist_matrix.shape == (jac_matrix.shape[0], 1)
                 d2_sum = (dist_matrix**2).sum(dim=0).item()
                 accepted = (d2_sum <= max_d2_sum)
+            else:
+                raise NotImplementedError(f"LIE variant not implemented: {method}")
             
             if accepted:
                 z_succ = z
@@ -594,7 +626,12 @@ class GradientInverter:
                 f"inconsistent when performing the LIE attack."
             )
 
-    def lie_attack(self, model: nn.Module, settings: LearningSettings) -> Tensor:
+    def lie_attack(
+            self,
+            model: nn.Module,
+            settings: LearningSettings,
+            method: GradientAttack = GradientAttack.LITTLE_IS_ENOUGH,
+        ) -> Tensor:
         """Find the target gradient for the Little Is Enough attack.
 
         Returns:
@@ -608,7 +645,11 @@ class GradientInverter:
         #std_grad = fed.Stddev()(jac_matrix).requires_grad_(False)
         std_grad = agg_grad.sign()
 
-        z = self._lie_find_std_factor(settings, jac_matrix, agg_grad, std_grad)
+        z = self._lie_find_std_factor(
+            settings,
+            jac_matrix, agg_grad, std_grad,
+            method=method,
+        )
 
         # Calculate the final gradient of the attack (LIE)
         return agg_grad + z * std_grad
@@ -675,7 +716,7 @@ class GradientInverter:
         
         device = _detect_device(model)
 
-        if self.method == GradientAttack.LITTLE_IS_ENOUGH:
+        if self.method.is_adaptative:
             # TODO: report number of selected gradients
             target_grad = self.lie_attack(model, settings)
         else:
@@ -705,7 +746,7 @@ class GradientInverter:
             model.zero_grad()
 
             loss_atk_2 = self.poison_objective(
-                x_p, y_p, target_grad,
+                tracker.x_p, tracker.y_p, target_grad,
                 model, criterion, settings,
             ).item()
 
@@ -713,7 +754,7 @@ class GradientInverter:
                 # TODO: random restart here?
                 pass
             if (self.method in (GradientAttack.ASCENT, GradientAttack.ORTHOGONAL)
-                    and loss_atk_2.item() > 0.25 # Needs to be a positive number
+                    and loss_atk_2 > 0.25 # Needs to be a positive number
                     and step - tracker.last_restart > 2
                     and step < min(6, tracker.steps - 4)):
 
@@ -721,8 +762,6 @@ class GradientInverter:
                 tracker._restart(x_p, y_p, device)
                 continue
             
-            y_p.requires_grad_(False)
-            y_p.grad = None
             model.zero_grad()
         
         (x_p, y_p), loss_atk = tracker.best_result()

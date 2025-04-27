@@ -67,7 +67,6 @@ class Krum(Aggregator):
         :note: `m = n - (2f + 3)` is the maximum value which gives theoretical Byzantine
         resilience guarantees.
         """
-        tol = 0.1
         f = int(tol / (1 - tol) * num_clean)
         n = num_clean + f
         m = n - (2 * f + 3)
