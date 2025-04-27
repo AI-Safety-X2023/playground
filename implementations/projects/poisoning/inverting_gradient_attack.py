@@ -68,64 +68,71 @@ class Hyperparams:
             hparams (Hyperparams): a good preset of hyperparameters for the optimizer
                 and the model.
         """
-        is_none = model_cls is None
-        if not is_none:
-            model_name = model_cls.__name__.lower()
-            is_resnet = model_name.startswith('resnet')
-            is_shufflenet = model_name.startswith('shufflenet')
+        assert issubclass(opt_cls, Optimizer)
 
-        # TODO: different for ShuffleNetV2
-        if issubclass(opt_cls, SGD):
-            if is_none:
-                return Hyperparams(
+        is_none = model_cls is None
+        # Works with both class and function model factories
+        model_name = 'None' if is_none else model_cls.__name__
+        opt_name = opt_cls.__name__
+        PRESETS = {
+            'SGD': {
+                'None': Hyperparams(
                     lr=1e-2,
                     epochs=5,
                     weight_decay=1e-5,
                     momentum=0.9,
-                )
-            elif is_resnet:
-                # Best for ResNet-18
-                return Hyperparams(
+                ),
+                'ResNet-18': Hyperparams(
                     lr=1e-3, # 1e-2
                     epochs=5,
                     weight_decay=1e-5,
                     momentum=0.9, # 0
-                )
-            elif is_shufflenet:
-                # Best for ShuffleNetV2
-                return Hyperparams(
+                ),
+                'ShuffleNetV2': Hyperparams(
                     lr=1e-2, # 2e-2
                     epochs=4, # 7
                     weight_decay=1e-5,
                     momentum=0.9, # 0
+                ),
+                'ConvNet16': Hyperparams(
+                    lr=5e-2,
+                    epochs=6,
+                    weight_decay=0,
+                    momentum=0,
                 )
-        elif issubclass(opt_cls, Adam):
-            if is_none:
-                return Hyperparams(
+            },
+            'Adam': {
+                'None': Hyperparams(
                     lr=1e-3,
                     epochs=5,
                     weight_decay=1e-5,
-                )
-            if is_resnet:
-                # Best for ResNet-18
-                return Hyperparams(
+                ),
+                'ResNet-18': Hyperparams(
                     lr=5e-4, # 2e-4
                     epochs=6, # 3
                     weight_decay=1e-5,
-                )
-            elif is_shufflenet:
-                # Best for ShuffleNetV2
-                return Hyperparams(
+                ),
+                'ShuffleNetV2': Hyperparams(
                     lr=2e-3,
                     epochs=6,
                     weight_decay=1e-5,
+                ),
+                'ConvNet16': Hyperparams(
+                    lr=5e-3,
+                    epochs=6,
+                    weight_decay=0,
+                    momentum=0,
                 )
-
-        if not (is_resnet or is_shufflenet):
-            warn(
-                f"Warning: unknown model {model_name}, "
-                "using default hyperparameters."
-            )
+            }
+        }
+        if opt_name in PRESETS:
+            if model_name in PRESETS[opt_name]:
+                return PRESETS[opt_name][model_name]
+            else:
+                warn(
+                    f"Warning: unknown model {model_name}, "
+                    "using default hyperparameters."
+                )
         else:
             warn(
                 f"Warning: unknown optimizer {opt_cls.__name__}, "
