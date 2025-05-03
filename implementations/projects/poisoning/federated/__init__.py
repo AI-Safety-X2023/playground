@@ -6,7 +6,7 @@ from torch.nn import functional as F
 from torch.nn.modules.loss import _Loss
 import torch.func as ft
 
-from . import utils
+from . import utils #noqa
 
 # Inspired by torchjd: https://torchjd.org
 class Aggregator(nn.Module, ABC):

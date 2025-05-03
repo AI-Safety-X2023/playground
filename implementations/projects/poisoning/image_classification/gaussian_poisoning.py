@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
-import numpy as np
 import torch
 from torch import nn, Tensor
 from torch.nn.modules.loss import _Loss
@@ -165,9 +163,9 @@ def gaussian_unlearning_score(
         loss_b = loss_fn(logits, y_b.to(device))
 
         if not hasattr(loss_b, 'shape') or loss_b.shape == ():
-            raise ValueError(f'Expected a loss value per element, got a scalar')
+            raise ValueError("Expected a loss value per element, got a scalar")
         if loss_b.shape != (len(X_b),):
-            raise ValueError(f'Expected a loss value per element, got `{loss_fn.reduction}`')
+            raise ValueError(f"Expected a loss value per element, got `{loss_fn.reduction}`")
 
         # Perform backpropagation on each element of the batch
         for j, (loss, xi) in enumerate(zip(loss_b, noise_b)):

@@ -5,7 +5,7 @@ import random
 import numpy as np
 import torch
 from functools import partialmethod
-from tqdm.auto import tqdm, trange
+from tqdm.auto import tqdm, trange #noqa
 
 def use_tqdm(enable: bool, ascii=False):
     """

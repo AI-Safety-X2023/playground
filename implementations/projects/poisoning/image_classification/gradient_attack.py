@@ -16,7 +16,7 @@ from torchmetrics.functional import total_variation
 import federated as fed
 
 from .nn import _detect_device, MetricLogger
-from .utils import trange, mem_aware_pdist
+from .utils import mem_aware_pdist
 from .datasets import EagerDataset
 
 
@@ -543,7 +543,7 @@ class GradientInverter:
         num_harmful = settings.num_byzantine
 
         jac_matrix.requires_grad_(False).detach_()
-        if z_init == None:
+        if z_init is None:
             from torch.linalg import norm
             grad_norms = norm(jac_matrix, dim=1)
             assert grad_norms.shape == (jac_matrix.shape[0],)
@@ -775,14 +775,13 @@ class GradientInverter:
             logger.compute_additional_metrics(['loss_atk'], history.unsqueeze(0))
         
         if isinstance(self.sample_init, SampleInitFeedback):
-            l = loss_atk
             m = {
                 GradientAttack.ASCENT: 0.0,
                 GradientAttack.ORTHOGONAL: 0.2,
                 GradientAttack.LITTLE_IS_ENOUGH: 1.0,
             }[self.method]
             # If it is good, backup this improved poison for future attack steps
-            self.sample_init.feedback(x_p, y_p, l, max_acceptable_loss=m)
+            self.sample_init.feedback(x_p, y_p, loss_atk, max_acceptable_loss=m)
 
         return x_p, y_p
 

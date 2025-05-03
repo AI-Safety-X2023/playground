@@ -3,14 +3,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 import numpy as np
 import torch
-from torch import nn, Tensor
+from torch import nn
 from torch.nn import functional as F
 from torch.nn.modules.loss import _Loss
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from torch.optim import Optimizer, SGD
 from torchmetrics import Metric
 
-from .utils import tqdm, trange
+from .utils import trange
 from .nn import (
     MetricLogger, Logs,
     test_epoch, distillation_epoch, train_val_loop,
@@ -123,7 +123,8 @@ def gradient_ascent(
     We use the approximate unlearning method suggested by Jang et al.\\
     https://arxiv.org/abs/2210.01504
     """
-    criterion = lambda y, y_true: -loss_fn(y, y_true)
+    def criterion(y, y_true):
+        return -loss_fn(y, y_true)
     return train_val_loop(
         model,
         forget_loader, val_loader,

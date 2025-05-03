@@ -1,5 +1,6 @@
 implementations/projects/poisoning/data
 implementations/projects/poisoning/runs
+.vscode/
 
 test_trainer
 

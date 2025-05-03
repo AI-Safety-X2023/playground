@@ -1,7 +1,7 @@
 from torch import nn
 
 # https://pytorch.org/docs/2.6/func.batch_norm.html
-from torch.func import replace_all_batch_norm_modules_ as disable_bn_modules
+from torch.func import replace_all_batch_norm_modules_ as disable_bn_modules #noqa
 
 
 def convert_bn_modules_to_gn(module: nn.Module, default_num_groups: int = 16) -> nn.Module:

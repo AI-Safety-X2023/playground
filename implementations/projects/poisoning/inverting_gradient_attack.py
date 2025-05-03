@@ -6,22 +6,22 @@ from enum import IntEnum
 import dataclasses
 from dataclasses import dataclass
 import numpy as np
-from torch import nn, Tensor
+from torch import nn
 from torch.nn.modules.loss import _Loss, CrossEntropyLoss
 from torch.optim import Optimizer, SGD, Adam
 from torch.utils.data import Dataset, DataLoader, TensorDataset
-from torchmetrics import CatMetric, Metric, MetricCollection, MetricTracker
+from torchmetrics import CatMetric, MetricCollection, MetricTracker
 from torchmetrics.classification import MulticlassAccuracy
 
 import federated as fed
-from federated import Aggregator, Mean, Krum
+from federated import Aggregator, Mean, Krum #noqa
 
 from image_classification.utils import trange
 from image_classification.accel import BEST_DEVICE
 from image_classification.datasets import UpdatableDataset
 
 from image_classification.nn import (
-    MetricLogger, Logs, train_loop, test_epoch, train_val_loop
+    MetricLogger, Logs, test_epoch, train_val_loop
 )
 from image_classification.gradient_attack import GradientInverter, LearningSettings
 from image_classification.unlearning import (
@@ -256,7 +256,7 @@ class Pipeline:
         Returns:
             Optimizer: the optimizer.
         """
-        if opt_cls == None:
+        if opt_cls is None:
             opt_cls = self.opt_cls
         if lr is None:
             lr = self.hparams.lr
