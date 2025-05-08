@@ -1,6 +1,9 @@
 # Playground
 
-Un dépôt centralisé pour partager des idées et des implémentations de techniques en sécurité de l'IA
+Un dépôt centralisé pour implémenter des techniques en sécurité de l'IA
+
+> [!WARNING] Disclaimer
+> Dans sa forme actuelle, ce code n'a pas pour vocation à être présenté ou réutilisé.
 
 ## Structure du dépôt
 
